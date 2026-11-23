@@ -28,8 +28,8 @@ def credentials() -> tuple[str, str, str]:
     password = os.environ.get("GMAIL_APP_PASSWORD", "").replace(" ", "")
     if not address or not password:
         raise EmailConfigError(
-            "Email is not set up: GMAIL_ADDRESS and GMAIL_APP_PASSWORD must be set "
-            "(as repository secrets on GitHub). See README.md."
+            "Email is not set up: put GMAIL_ADDRESS and GMAIL_APP_PASSWORD "
+            "in the .env file. See README.md."
         )
     recipient = os.environ.get("ALERT_TO", "").strip() or address
     return address, password, recipient

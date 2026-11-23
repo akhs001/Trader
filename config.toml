@@ -2,6 +2,10 @@
 # market hours today's unfinished candle is included, so prices are live
 # (about 15 minutes delayed).
 
+[schedule]
+# How often the bot checks the watchlist while the US market is open.
+interval_minutes = 15
+
 [alerts]
 # After a signal fires for a stock, the same signal is not emailed again
 # for this many calendar days.

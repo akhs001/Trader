@@ -3,9 +3,11 @@ import unittest
 from datetime import date, timedelta
 from pathlib import Path
 
-from trader import emailer, indicators
+from datetime import datetime, timezone
+
+from trader import emailer, indicators, market
 from trader.data import DataError, History, parse_chart
-from trader.main import load_watchlist
+from trader.main import load_env_file, load_watchlist
 from trader.signals import scan
 from trader.state import AlertState
 
@@ -184,7 +186,7 @@ class SignalTests(unittest.TestCase):
 class DataTests(unittest.TestCase):
     def payload(self, **meta):
         return {"chart": {"error": None, "result": [{
-            "meta": {"shortName": "Apple Inc.", "exchangeTimezoneName": "America/New_York", **meta},
+            "meta": {"shortName": "Apple Inc.", "gmtoffset": -18000, **meta},
             # 2024-01-02, -03, -04 at 14:30 UTC (09:30 New York)
             "timestamp": [1704205800, 1704292200, 1704378600],
             "indicators": {"quote": [{
@@ -270,6 +272,45 @@ class StateAndEmailTests(unittest.TestCase):
             path = Path(tmp) / "watchlist.txt"
             path.write_text("# my stocks\naapl\n\nMSFT  # big one\nAAPL\n")
             self.assertEqual(load_watchlist(path), ["AAPL", "MSFT"])
+
+
+class MarketHoursTests(unittest.TestCase):
+    def utc(self, *parts):
+        return datetime(*parts, tzinfo=timezone.utc)
+
+    def test_new_york_offset_follows_daylight_time(self):
+        # 2026: daylight time starts 8 March and ends 1 November.
+        self.assertEqual(market.new_york_time(self.utc(2026, 1, 15, 15, 0)).hour, 10)
+        self.assertEqual(market.new_york_time(self.utc(2026, 7, 15, 15, 0)).hour, 11)
+        self.assertEqual(market.new_york_time(self.utc(2026, 3, 8, 6, 59)).hour, 1)
+        self.assertEqual(market.new_york_time(self.utc(2026, 3, 8, 7, 0)).hour, 3)
+        self.assertEqual(market.new_york_time(self.utc(2026, 11, 1, 5, 59)).hour, 1)
+        self.assertEqual(market.new_york_time(self.utc(2026, 11, 1, 6, 0)).hour, 1)
+        self.assertEqual(market.new_york_time(self.utc(2026, 11, 23, 15, 0)).hour, 10)
+
+    def test_scan_window(self):
+        # Monday 23 November 2026, winter time: the session is 14:30-21:00 UTC.
+        self.assertFalse(market.is_scan_time(15, self.utc(2026, 11, 23, 14, 29)))
+        self.assertTrue(market.is_scan_time(15, self.utc(2026, 11, 23, 14, 30)))
+        self.assertTrue(market.is_scan_time(15, self.utc(2026, 11, 23, 21, 15)))
+        self.assertFalse(market.is_scan_time(15, self.utc(2026, 11, 23, 21, 16)))
+        # Saturday
+        self.assertFalse(market.is_scan_time(15, self.utc(2026, 11, 21, 16, 0)))
+        # Summer time: the session starts at 13:30 UTC.
+        self.assertTrue(market.is_scan_time(15, self.utc(2026, 7, 15, 13, 30)))
+
+    def test_env_file(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text('# comment\nTRADER_TEST_A = hello\nTRADER_TEST_B="quoted value"\n')
+            try:
+                load_env_file(path)
+                self.assertEqual(os.environ["TRADER_TEST_A"], "hello")
+                self.assertEqual(os.environ["TRADER_TEST_B"], "quoted value")
+            finally:
+                os.environ.pop("TRADER_TEST_A", None)
+                os.environ.pop("TRADER_TEST_B", None)
 
 
 if __name__ == "__main__":

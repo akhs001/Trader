@@ -9,7 +9,6 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 HOSTS = ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
 USER_AGENT = (
@@ -39,7 +38,7 @@ class History:
 
 def fetch_history(symbol: str, range_: str = "2y", retries: int = 3) -> History:
     path = f"/v8/finance/chart/{urllib.parse.quote(symbol)}?range={range_}&interval=1d"
-    last_error: Exception | None = None
+    last_error: Exception | str | None = None
     for attempt in range(retries):
         host = HOSTS[attempt % len(HOSTS)]
         request = urllib.request.Request(
@@ -52,6 +51,8 @@ def fetch_history(symbol: str, range_: str = "2y", retries: int = 3) -> History:
             if error.code == 404:
                 raise DataError(f"{symbol}: unknown ticker") from error
             last_error = error
+            if error.code == 429:
+                last_error = "Yahoo is refusing requests from this network (HTTP 429)"
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
             last_error = error
         time.sleep(2 * (attempt + 1))
@@ -68,7 +69,9 @@ def parse_chart(symbol: str, payload: dict) -> History:
     result = results[0]
     meta = result.get("meta", {})
     quote = result["indicators"]["quote"][0]
-    tz = ZoneInfo(meta.get("exchangeTimezoneName") or "America/New_York")
+    # Shift timestamps by the exchange's UTC offset to get its local dates.
+    # (Plain arithmetic rather than zoneinfo, which needs extra data on Windows.)
+    offset = int(meta.get("gmtoffset") or 0)
 
     history = History(
         symbol=symbol,
@@ -82,7 +85,7 @@ def parse_chart(symbol: str, payload: dict) -> History:
     for ts, o, h, l, c, v in rows:
         if None in (o, h, l, c):
             continue  # Yahoo leaves gaps as nulls (e.g. a candle before the open)
-        history.dates.append(datetime.fromtimestamp(ts, tz).date().isoformat())
+        history.dates.append(_local_date(ts, offset))
         history.opens.append(float(o))
         history.highs.append(float(h))
         history.lows.append(float(l))
@@ -91,18 +94,21 @@ def parse_chart(symbol: str, payload: dict) -> History:
     if not history.dates:
         raise DataError(f"{symbol}: no usable price data")
 
-    history.session_fraction = _session_fraction(meta, history.dates[-1], tz)
+    history.session_fraction = _session_fraction(meta, history.dates[-1], offset)
     return history
 
 
-def _session_fraction(meta: dict, last_date: str, tz: ZoneInfo) -> float:
+def _local_date(timestamp: int, offset: int) -> str:
+    return datetime.fromtimestamp(timestamp + offset, timezone.utc).date().isoformat()
+
+
+def _session_fraction(meta: dict, last_date: str, offset: int) -> float:
     regular = (meta.get("currentTradingPeriod") or {}).get("regular") or {}
     start, end = regular.get("start"), regular.get("end")
     now = meta.get("regularMarketTime")
     if not (start and end and now) or end <= start:
         return 1.0
-    session_date = datetime.fromtimestamp(start, tz).date().isoformat()
-    if last_date != session_date or now >= end:
+    if last_date != _local_date(start, offset) or now >= end:
         return 1.0
     # Guard against a clock that says "still open" long after the last trade.
     if datetime.now(timezone.utc).timestamp() >= end:
