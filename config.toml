@@ -1,0 +1,38 @@
+# Settings for the watchlist scanner. All signals use daily candles; during
+# market hours today's unfinished candle is included, so prices are live
+# (about 15 minutes delayed).
+
+[alerts]
+# After a signal fires for a stock, the same signal is not emailed again
+# for this many calendar days.
+cooldown_days = 5
+
+[signals.trend_pullback]
+enabled = true
+# Uptrend = price above the 200-day average and 50-day above 200-day.
+# Pullback = within the last `lookback_days` the low came within
+# `touch_pct` percent of the 20- or 50-day average, or RSI fell below `rsi_below`.
+# Entry = today's price moves above yesterday's high.
+lookback_days = 5
+touch_pct = 1.0
+rsi_below = 40
+
+[signals.breakout]
+enabled = true
+# Entry = price moves above the highest high of the previous `lookback_days`
+# with volume at least `volume_ratio` times the 20-day average.
+lookback_days = 20
+volume_ratio = 1.5
+
+[signals.oversold_bounce]
+enabled = true
+# Entry = RSI(14) was below `rsi_level` yesterday and is back above it today.
+rsi_level = 30
+
+[signals.ma_cross]
+enabled = true
+# Entry = the fast average crosses above the slow average.
+fast = 20
+slow = 50
+# Also alert when MACD (12, 26, 9) crosses above its signal line.
+macd = true

@@ -1,0 +1,63 @@
+name: Watchlist scan
+
+on:
+  schedule:
+    # Every hour at :40 on weekdays, 13:40-21:40 UTC. That covers the US
+    # session (09:30-16:00 New York) in both summer and winter time, plus
+    # one run after the close.
+    - cron: "40 13-21 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: What to run
+        type: choice
+        default: scan
+        options:
+          - scan
+          - dry-run (print signals, send nothing)
+          - test-email (send a test email)
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watchlist-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # Remembers which alerts were already emailed between runs.
+      - name: Restore alert history
+        uses: actions/cache/restore@v6
+        with:
+          path: .state
+          key: alert-state-${{ github.run_id }}
+          restore-keys: alert-state-
+
+      - name: Run tests
+        run: python3 -m unittest discover -s tests -q
+
+      - name: Scan watchlist
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+          MODE: ${{ inputs.mode || 'scan' }}
+        run: |
+          case "$MODE" in
+            dry-run*)    python3 -m trader.main --dry-run ;;
+            test-email*) python3 -m trader.main --test-email ;;
+            *)           python3 -m trader.main ;;
+          esac
+
+      - name: Save alert history
+        if: hashFiles('.state/alerts.json') != ''
+        uses: actions/cache/save@v6
+        with:
+          path: .state
+          key: alert-state-${{ github.run_id }}
