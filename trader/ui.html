@@ -295,6 +295,7 @@
     Entry, SL and TP are calculated by fixed rules from the latest price; they are not predictions
     and not financial advice. Check the chart before trading.
     <span id="test-email-wrap"> · <button class="link" id="test-email">Send a test email</button> <span id="test-email-result"></span></span>
+    <span id="logout-wrap" style="display:none"> · <button class="link" id="logout">Sign out</button></span>
   </footer>
 </main>
 
@@ -321,13 +322,16 @@ async function post(path, body = {}) {
     headers: {"Content-Type": "application/json", "X-Trader": "1"},
     body: JSON.stringify(body),
   });
+  if (response.status === 401) location.reload();  // signed out: back to the sign-in page
   return response.json();
 }
 
 async function refresh() {
   clearTimeout(timer);
   try {
-    state = await (await fetch("/api/state")).json();
+    const response = await fetch("/api/state");
+    if (response.status === 401) { location.reload(); return; }
+    state = await response.json();
     offline = false;
   } catch (error) {
     offline = true;
@@ -339,6 +343,10 @@ async function refresh() {
   timer = setTimeout(refresh, pause);
 }
 
+// Times come from the program as seconds since 1970 and are shown in this device's time.
+function clock(seconds) {
+  return new Date(seconds * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+}
 function money(value) { return value == null ? "" : value.toFixed(2); }
 function percent(value) { return value == null ? "" : (value >= 0 ? "+" : "") + value.toFixed(2) + "%"; }
 
@@ -363,7 +371,9 @@ function render() {
   if (state.stale !== false) banners.append(el("div", {class: "banner error",
     text: "Trader was updated, but the old version is still running. Close the black Trader window, then double-click start.bat again."}));
   if (!setup.data) banners.append(el("div", {class: "banner", text: "Prices cannot be read yet. " + setup.data_problem}));
-  if (!setup.email) banners.append(banner("Email is not set up, so entries are only shown here. To get emails, put GMAIL_ADDRESS and GMAIL_APP_PASSWORD in the ", ".env", " file, then restart Trader."));
+  if (!setup.email) banners.append(el("div", {class: "banner", text: "Entries are only shown here for now. " +
+    (setup.email_problem || "Email is not set up.")}));
+  $("logout-wrap").style.display = state.auth ? "" : "none";
   if (scan.error) banners.append(el("div", {class: "banner error", text: scan.error}));
 
   // Strategy and direction for checks
@@ -403,7 +413,7 @@ function render() {
   if (scan.running) {
     status = scan.message || ("Checking " + (scan.current || "…") + " (" + Math.min(done + 1, scan.total) + " of " + scan.total + ")");
   } else if (scan.finished) {
-    status = "Checked at " + scan.finished + " for " + selectionLabel(scan.strategy, scan.direction, scan.timeframe) + ": " + (hits.length ? plural(hits.length, "stock") + " with a possible entry" : "no entries right now") + ". " + (scan.email || "");
+    status = "Checked at " + clock(scan.finished) + " for " + selectionLabel(scan.strategy, scan.direction, scan.timeframe) + ": " + (hits.length ? plural(hits.length, "stock") + " with a possible entry" : "no entries right now") + ". " + (scan.email || "");
     if (auto.enabled && !market.open) status += " Automatic checks resume when the market opens.";
   } else if (watchlist.length === 0) {
     status = "Add a ticker to your watchlist to get started.";
@@ -540,7 +550,7 @@ function renderScreen() {
   if (!result) return;
   box.append(el("h2", {text: result.name + ", " + selectionLabel(result.strategy, result.direction) + ": " +
     plural(result.hits.length, "stock") + " with a possible entry"}));
-  const summary = "Checked " + plural(result.scanned, "stock") + " at " + result.finished +
+  const summary = "Checked " + plural(result.scanned, "stock") + " at " + clock(result.finished) +
     (result.failed ? "; " + result.failed + " had no prices." : ".");
   if (!result.hits.length) {
     box.append(el("section", {class: "card"}, el("div", {class: "empty", text: summary + " No entries right now."})));
@@ -906,6 +916,7 @@ $("bt-run").addEventListener("click", async () => {
   refresh();
 });
 
+$("logout").addEventListener("click", async () => { await post("/api/logout"); location.reload(); });
 $("check").addEventListener("click", async () => {
   $("check").disabled = true;
   await post("/api/check", {email: $("email").checked});

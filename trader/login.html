@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trader</title>
+<style>
+  :root { --bg: #f4f5f7; --card: #ffffff; --line: #e1e4e8; --text: #1b1f24; --muted: #646d78;
+          --accent: #1f6feb; --accent-text: #ffffff; --down: #cf222e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1216; --card: #181c22; --line: #2a3038; --text: #e8ebef; --muted: #98a2ae;
+            --accent: #4c8dff; --accent-text: #0b1220; --down: #ff7b72; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px;
+         background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  form { width: 100%; max-width: 340px; background: var(--card); border: 1px solid var(--line);
+         border-radius: 12px; padding: 24px; }
+  h1 { font-size: 22px; margin: 0 0 16px; }
+  label { display: block; font-size: 14px; color: var(--muted); margin-bottom: 6px; }
+  input { width: 100%; font: inherit; color: var(--text); background: var(--card);
+          border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; }
+  button { width: 100%; margin-top: 14px; font: inherit; font-weight: 600; cursor: pointer;
+           border: 0; border-radius: 8px; padding: 10px; background: var(--accent); color: var(--accent-text); }
+  button:disabled { opacity: .6; }
+  #error { color: var(--down); font-size: 14px; min-height: 21px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<form id="login">
+  <h1>Trader</h1>
+  <label for="password">Password</label>
+  <input type="password" id="password" autocomplete="current-password" autofocus required>
+  <button type="submit" id="go">Sign in</button>
+  <div id="error" role="alert"></div>
+</form>
+<script>
+document.getElementById("login").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = document.getElementById("go");
+  const error = document.getElementById("error");
+  button.disabled = true;
+  error.textContent = "";
+  try {
+    const response = await fetch("/api/login", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-Trader": "1"},
+      body: JSON.stringify({password: document.getElementById("password").value}),
+    });
+    const result = await response.json();
+    if (response.ok) { location.reload(); return; }
+    error.textContent = result.error || "Could not sign in.";
+  } catch (problem) {
+    error.textContent = "Trader could not be reached.";
+  }
+  button.disabled = false;
+});
+</script>
+</body>
+</html>

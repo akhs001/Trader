@@ -92,6 +92,12 @@ closing it stops Trader.
   or one of them (trend continuation, trend pullback, breakout, RSI reversal,
   moving-average cross, MACD cross), and long, short or both. The choice is remembered and
   also applies to automatic checks and emails.
+- **Candles** chooses the timeframe. *Daily* looks for swing entries on daily
+  candles. *Hourly (day trading)* runs the same strategies on hourly candles:
+  every "day" in a rule becomes an hour (the 20-hour average, the previous
+  hour's high), and SL and TP are sized from the hourly range, so they sit
+  much closer. Hourly alerts repeat after `cooldown_hours` (24) at the
+  earliest.
 - **Check entries** checks the whole watchlist now. Stocks with a signal
   appear as cards with Entry, SL, TP1 and TP2; the table lists every stock.
 - **Email me new entries** also emails the entries that have not been emailed
@@ -106,12 +112,28 @@ closing it stops Trader.
 The page only answers on your own computer; it is not reachable from the
 network.
 
+### Scanner tab
+
+The Scanner looks for entries beyond your watchlist. Pick a list of stocks
+(Nasdaq 100, S&P 500, Dow Jones 30, or Yahoo's most active, top gainers or top
+losers of the day), a strategy and a direction, and press **Scan market**. It
+downloads daily prices in batches and lists every stock with an entry today,
+with its Entry, SL and TP. **+ Watch** adds a stock to your watchlist. The
+Dow takes seconds, the Nasdaq 100 about a minute, the S&P 500 several minutes.
+
+A scan only shows results; it never emails. Index members are read from a
+public list on GitHub when you scan, with a copy saved in the project for
+when that list cannot be reached.
+
 ### Backtest tab
 
 The Backtest tab shows how the strategies would have done on one stock's past
 prices. You choose:
 
 - **Strategy** and **Direction**: all strategies or one, long, short or both.
+- **Candles**: daily, or hourly to test day trading. On hourly candles the
+  signals, the entries and the exits all come from hourly prices, which reach
+  back about two years.
 - **Ticker**: any ticker, on your watchlist or not.
 - **Period**: the last 1, 2 or 5 years.
 - **Take profit at**: whether TP1 or TP2 ends a winning trade.
@@ -164,6 +186,47 @@ source = "twelvedata"
 
 Its free plan allows 8 requests a minute, so a longer watchlist pauses during
 a check.
+
+## Running in the cloud
+
+Trader can run on a hosting service instead of your PC, so automatic checks
+and emails keep going while your computer is off, and the page works from your
+phone. On a host, Trader:
+
+- asks for a password before showing anything (it will not start without one),
+- keeps your watchlist, settings and alert history in a folder you name, so
+  they survive new versions,
+- sends email through [Resend](https://resend.com), because hosts block the
+  Gmail connection,
+- updates by itself whenever a new version is pushed to GitHub.
+
+Steps for [Railway](https://railway.com) (a paid service, about $5 a month):
+
+1. **New Project → Deploy from GitHub repo** and choose this repository.
+2. On the service, open **Variables** and add:
+
+   | Variable | Value |
+   | --- | --- |
+   | `TRADER_PASSWORD` | The password for the page, at least 8 characters |
+   | `TRADER_DATA_DIR` | `/data` |
+   | `RESEND_API_KEY` | An API key from your Resend account |
+   | `ALERT_TO` | The address that should get the alerts |
+   | `ALERT_FROM` | Optional. A sender on a domain you verified at Resend |
+
+   Without `ALERT_FROM` the sender is Resend's shared address, which only
+   delivers to the email address of your own Resend account.
+3. Add a **Volume** to the service and mount it at `/data`. Without it the
+   watchlist is lost at every new version.
+4. Under **Settings → Networking**, generate a public domain.
+5. Open that address, sign in, and set up your watchlist. Tick **Check
+   automatically** to get emails while your PC is off.
+
+The start command and health check come from `railway.toml` in this
+repository. Another host works the same way as long as it sets `PORT`, or you
+set `TRADER_HOST=0.0.0.0` yourself.
+
+Use a long password and keep it to yourself: anyone who has it can read and
+change your watchlist. Ten wrong passwords lock sign-in for five minutes.
 
 ## Updating
 

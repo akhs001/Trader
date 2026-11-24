@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import unittest.mock
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -1192,6 +1193,184 @@ class UpdateTests(unittest.TestCase):
             config = load_config(path)
             self.assertEqual(config["plan"], {"min_stop_atr": 1.0, "targets_r": [1.5]})
             self.assertEqual(config["alerts"]["cooldown_days"], 5)
+
+
+class HostingTests(unittest.TestCase):
+    """Trader on a hosting service: a password page in front of everything."""
+
+    PASSWORD = "correct horse battery"
+
+    def setUp(self):
+        import json, threading, urllib.request
+        from unittest import mock
+        from trader import app as app_module
+        self.json, self.urllib, self.app_module = json, urllib.request, app_module
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        (root / "config.toml").write_text("[schedule]\ninterval_minutes = 15\n")
+        (root / "data").mkdir()
+        (root / "data" / "config.local.toml").write_text("[schedule]\ninterval_minutes = 3\n")
+        patcher = mock.patch.object(app_module.time, "sleep")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.app = app_module.App(root / "data" / "watchlist.txt", root / "config.toml", root / "data" / ".state",
+                                  local_config=root / "data" / "config.local.toml",
+                                  password=self.PASSWORD, hosted=True)
+        self.server = app_module.ThreadingHTTPServer(("127.0.0.1", 0), app_module.make_handler(self.app))
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def call(self, path, body=None, cookie=None, headers=None):
+        import urllib.error
+        request = self.urllib.Request(self.base + path, headers={"Host": "trader.example.com", **(headers or {})})
+        if body is not None:
+            request.data = self.json.dumps(body).encode()
+            request.add_header("X-Trader", "1")
+        if cookie:
+            request.add_header("Cookie", cookie)
+        opener = self.urllib.build_opener(self.urllib.ProxyHandler({}))
+        try:
+            response = opener.open(request, timeout=10)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            raw = response.read()
+            payload = self.json.loads(raw) if response.headers.get_content_type() == "application/json" else raw
+            return response.status, payload, response.headers.get("Set-Cookie") or ""
+
+    def sign_in(self):
+        status, _, cookie = self.call("/api/login", {"password": self.PASSWORD})
+        self.assertEqual(status, 200)
+        return cookie.split(";")[0]
+
+    def test_nothing_is_shown_before_signing_in(self):
+        status, page, _ = self.call("/")
+        self.assertEqual(status, 200)
+        self.assertIn(b'id="login"', page)
+        self.assertNotIn(b"Check entries", page)
+        for path in ("/api/state", "/api/backtest", "/api/screen"):
+            self.assertEqual(self.call(path)[0], 401)
+        for path in ("/api/check", "/api/watchlist/add", "/api/backtest", "/api/quit"):
+            self.assertEqual(self.call(path, {"symbol": "AAPL"})[0], 401)
+        self.assertEqual(self.call("/healthz")[:2], (200, b"ok"))
+        self.assertFalse((Path(self.tmp.name) / "data" / "watchlist.txt").exists())
+
+    def test_signing_in_and_out(self):
+        status, payload, cookie = self.call("/api/login", {"password": "wrong"})
+        self.assertEqual((status, payload["error"], cookie), (401, "Wrong password.", ""))
+        session = self.sign_in()
+        _, _, set_cookie = self.call("/api/login", {"password": self.PASSWORD})
+        self.assertIn("HttpOnly", set_cookie)
+        self.assertIn("SameSite=Strict", set_cookie)
+        self.assertNotIn("Secure", set_cookie)
+        _, _, https_cookie = self.call("/api/login", {"password": self.PASSWORD}, headers={"X-Forwarded-Proto": "https"})
+        self.assertIn("Secure", https_cookie)
+
+        status, state, _ = self.call("/api/state", cookie=session)
+        self.assertEqual((status, state["auth"]), (200, True))
+        self.assertEqual(state["auto"]["interval"], 3)   # read from the data folder's own settings
+        self.assertIn(b"Check entries", self.call("/", cookie=session)[1])
+        self.assertEqual(self.call("/api/watchlist/add", {"symbol": "NVDA"}, cookie=session)[1]["error"], "")
+        self.assertIn("NVDA", (Path(self.tmp.name) / "data" / "watchlist.txt").read_text())
+
+        self.assertIn("Max-Age=0", self.call("/api/logout", {}, cookie=session)[2])
+
+    def test_passes_cannot_be_forged_or_outlive_their_time(self):
+        import time
+        session = self.sign_in()
+        expires, signature = session.split("=", 1)[1].split(".")
+        self.assertEqual(self.call("/api/state", cookie=f"trader_session={int(expires) + 1}.{signature}")[0], 401)
+        self.assertEqual(self.call("/api/state", cookie="trader_session=garbage")[0], 401)
+        self.assertEqual(self.call("/api/state", cookie="trader_session=.")[0], 401)
+        month_later = time.time() + 31 * 86400
+        with unittest.mock.patch.object(self.app_module.time, "time", lambda: month_later):
+            self.assertEqual(self.call("/api/state", cookie=session)[0], 401)
+        # A pass signed for another password is worthless.
+        other = self.app_module.App(self.app.watchlist_path, self.app.config_path, self.app.state_path.parent,
+                                    password="another password")
+        self.assertFalse(self.app.valid_session(other.new_session()))
+
+    def test_guessing_is_locked_out(self):
+        for _ in range(10):
+            self.assertEqual(self.call("/api/login", {"password": "guess"})[0], 401)
+        status, payload, _ = self.call("/api/login", {"password": self.PASSWORD})
+        self.assertEqual(status, 429)
+        self.assertIn("Too many", payload["error"])
+
+    def test_quit_is_only_for_the_local_app(self):
+        session = self.sign_in()
+        self.assertEqual(self.call("/api/quit", {}, cookie=session)[0], 404)
+        self.assertEqual(self.call("/api/state", cookie=session)[0], 200)   # still running
+
+    def test_will_not_start_reachable_without_a_password(self):
+        import contextlib, io, os
+        from unittest import mock
+        for password in ("", "short"):
+            with mock.patch.dict(os.environ, {"PORT": "0", "TRADER_PASSWORD": password}), \
+                 mock.patch.object(self.app_module, "load_env_file"), \
+                 mock.patch.object(self.app_module, "serve") as serve, \
+                 contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(self.app_module.main([]), 1)
+            serve.assert_not_called()
+            self.assertIn("TRADER_PASSWORD", out.getvalue())
+
+
+class ResendTests(unittest.TestCase):
+    def signal(self):
+        history = make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
+        return next(s for s in scan(history, CONFIG) if s.kind == "breakout")
+
+    def test_alerts_go_through_resend_when_a_key_is_set(self):
+        import io, json, os
+        from unittest import mock
+        sent = []
+
+        def fake_urlopen(request, timeout=0):
+            sent.append(request)
+            return io.BytesIO(b'{"id": "1"}')
+
+        env = {"RESEND_API_KEY": "re_123", "ALERT_TO": "me@example.com", "GMAIL_ADDRESS": "", "GMAIL_APP_PASSWORD": ""}
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(emailer.urllib.request, "urlopen", fake_urlopen), \
+             mock.patch.object(emailer, "send") as gmail:
+            self.assertEqual(emailer.send_alerts([self.signal()]), "me@example.com")
+            self.assertEqual(emailer.send_test(), "me@example.com")
+        gmail.assert_not_called()
+        request = sent[0]
+        self.assertEqual(request.full_url, "https://api.resend.com/emails")
+        self.assertEqual(request.get_header("Authorization"), "Bearer re_123")
+        payload = json.loads(request.data)
+        self.assertEqual((payload["from"], payload["to"], payload["subject"]),
+                         ("Trader <onboarding@resend.dev>", ["me@example.com"], "Entry alert: TEST long"))
+        self.assertIn("SL", payload["text"])
+        self.assertIn("<html>", payload["html"])
+        self.assertNotIn("html", json.loads(sent[1].data))   # the test email is plain text
+
+    def test_resend_problems_are_reported(self):
+        import io, os, urllib.error
+        from unittest import mock
+
+        def refuse(request, timeout=0):
+            raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {},
+                                         io.BytesIO(b'{"message": "You can only send to your own address"}'))
+        with mock.patch.dict(os.environ, {"RESEND_API_KEY": "re_123", "ALERT_TO": "x@example.com"}), \
+             mock.patch.object(emailer.urllib.request, "urlopen", refuse):
+            with self.assertRaises(emailer.EmailSendError) as raised:
+                emailer.send_test()
+        self.assertIn("You can only send to your own address", str(raised.exception))
+
+        with mock.patch.dict(os.environ, {"RESEND_API_KEY": "re_123", "ALERT_TO": "", "GMAIL_ADDRESS": ""}):
+            with self.assertRaises(emailer.EmailConfigError):
+                emailer.credentials()
+        with mock.patch.dict(os.environ, {"RESEND_API_KEY": "", "ALERT_TO": "", "GMAIL_ADDRESS": "", "GMAIL_APP_PASSWORD": ""}):
+            with self.assertRaises(emailer.EmailConfigError):
+                emailer.credentials()
+        gmail = {"RESEND_API_KEY": "", "GMAIL_ADDRESS": "me@gmail.com", "GMAIL_APP_PASSWORD": "abcd efgh", "ALERT_TO": ""}
+        with mock.patch.dict(os.environ, gmail):
+            self.assertEqual(emailer.credentials(), ("me@gmail.com", "abcdefgh", "me@gmail.com"))
 
 
 if __name__ == "__main__":

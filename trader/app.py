@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
+import os
 import re
 import smtplib
 import threading
@@ -18,6 +20,7 @@ import urllib.error
 import urllib.request
 import webbrowser
 from datetime import datetime
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -31,6 +34,9 @@ from .signals import STRATEGIES
 from .state import AlertState
 
 UI_FILE = Path(__file__).with_name("ui.html")
+LOGIN_FILE = Path(__file__).with_name("login.html")
+SESSION_DAYS = 30
+MIN_PASSWORD = 8
 MIN_INTERVAL, MAX_INTERVAL = 1, 15  # minutes between automatic checks
 SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9.\-:/]{0,14}$")
 
@@ -52,14 +58,19 @@ RUNNING_CODE = code_fingerprint()  # the version this process loaded
 class App:
     """Everything the page can show or do. One instance per running app."""
 
-    def __init__(self, watchlist: Path, config: Path, state_dir: Path):
+    def __init__(self, watchlist: Path, config: Path, state_dir: Path,
+                 local_config: Path | None = None, password: str = "", hosted: bool = False):
         self.watchlist_path = watchlist
         self.config_path = config
+        self.local_config_path = local_config  # the user's own settings; None = next to config
+        self.password = password  # when set, the page asks for it before showing anything
+        self.hosted = hosted  # reachable from the internet, not only from this computer
+        self.failed_logins: list[float] = []
         self.state_path = state_dir / "alerts.json"
         self.settings_path = state_dir / "app.json"
         self.lock = threading.Lock()
         self.scan = {"running": False, "results": [], "total": 0, "current": "",
-                     "message": "", "finished": "", "error": "", "email": "",
+                     "message": "", "finished": 0, "error": "", "email": "",
                      "strategy": "all", "direction": "both", "timeframe": "1d"}
         settings = self._load_settings()
         self.auto = bool(settings.get("auto"))
@@ -97,10 +108,12 @@ class App:
             # True once update.bat has replaced the program files: the page is
             # then newer than this running program, which must be restarted.
             "stale": code_fingerprint() != RUNNING_CODE,
+            "auth": bool(self.password),
         }
 
     def _setup(self) -> dict:
-        setup = {"data": True, "data_problem": "", "email": True, "email_to": ""}
+        setup = {"data": True, "data_problem": "", "email": True, "email_to": "",
+                 "email_problem": ""}
         try:
             check_setup(source_of(self._config()))
         except SetupError as problem:
@@ -108,12 +121,44 @@ class App:
             setup["data_problem"] = str(problem)
         try:
             setup["email_to"] = emailer.credentials()[2]
-        except emailer.EmailConfigError:
+        except emailer.EmailConfigError as problem:
             setup["email"] = False
+            setup["email_problem"] = str(problem)
         return setup
 
     def _config(self) -> dict:
-        return load_config(self.config_path)
+        return load_config(self.config_path, self.local_config_path)
+
+    # --- signing in ----------------------------------------------------------
+
+    def _session_key(self) -> bytes:
+        return hashlib.sha256(b"trader-session:" + self.password.encode()).digest()
+
+    def new_session(self) -> str:
+        """A signed pass that stays valid for SESSION_DAYS, even across restarts."""
+        expires = str(int(time.time()) + SESSION_DAYS * 86400)
+        signature = hmac.new(self._session_key(), expires.encode(), hashlib.sha256).hexdigest()
+        return f"{expires}.{signature}"
+
+    def valid_session(self, session: str) -> bool:
+        expires, _, signature = session.partition(".")
+        expected = hmac.new(self._session_key(), expires.encode(), hashlib.sha256).hexdigest()
+        return (hmac.compare_digest(signature, expected)
+                and expires.isdigit() and int(expires) > time.time())
+
+    def login(self, password) -> tuple[int, str]:
+        """Check a password. Returns (HTTP status, error message or '')."""
+        now = time.time()
+        with self.lock:
+            self.failed_logins = [at for at in self.failed_logins if now - at < 300]
+            if len(self.failed_logins) >= 10:
+                return 429, "Too many wrong passwords. Wait five minutes and try again."
+        if hmac.compare_digest(str(password).encode(), self.password.encode()):
+            return 200, ""
+        with self.lock:
+            self.failed_logins.append(now)
+        time.sleep(1)  # slows down guessing
+        return 401, "Wrong password."
 
     def _interval(self) -> int:
         """Minutes between automatic checks, between 1 and 15."""
@@ -167,7 +212,7 @@ class App:
         except Exception as problem:  # show the problem on the page instead of dying silently
             error = f"The check failed: {problem}"
         self._update(running=False, current="", message="", error=error, email=email,
-                     finished=datetime.now().strftime("%H:%M:%S"))
+                     finished=time.time())
 
     def _update(self, **changes) -> None:
         with self.lock:
@@ -247,7 +292,7 @@ class App:
                 "universe": market_id, "name": universe.UNIVERSES[market_id][0],
                 "strategy": strategy, "direction": direction, "hits": hits,
                 "scanned": len(symbols) - failed, "failed": failed,
-                "finished": datetime.now().strftime("%H:%M:%S"),
+                "finished": time.time(),
             }
         except (SetupError, DataError) as problem:
             error = str(problem)
@@ -314,7 +359,7 @@ class App:
             result.update(options=vars(options), symbol=symbol, tested_from=covered_from,
                           timeframe="1h" if hourly_signals else "1d",
                           tested_to=history.dates[-1][:10], candles=len(history.dates),
-                          finished=datetime.now().strftime("%H:%M:%S"))
+                          finished=time.time())
             self.backtest_result = result
         except (SetupError, DataError) as problem:
             error = str(problem)
@@ -373,8 +418,7 @@ class App:
     def send_test_email(self) -> str:
         """Returns a message describing what happened."""
         try:
-            sender, password, recipient = emailer.credentials()
-            emailer.send(emailer.test_message(sender, recipient), sender, password)
+            recipient = emailer.send_test()
         except emailer.EmailConfigError as problem:
             return str(problem)
         except smtplib.SMTPAuthenticationError:
@@ -431,10 +475,16 @@ def _row(result: StockResult, new_ids: set[int]) -> dict:
 def make_handler(app: App):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            if not self._local():
+            if self.path == "/healthz":  # lets a hosting service see that Trader is up
+                return self._send(200, b"ok", "text/plain")
+            if not self._allowed():
                 return
+            signed_in = self._signed_in()
             if self.path in ("/", "/index.html"):
-                self._send(200, UI_FILE.read_bytes(), "text/html; charset=utf-8")
+                page = UI_FILE if signed_in else LOGIN_FILE
+                self._send(200, page.read_bytes(), "text/html; charset=utf-8")
+            elif not signed_in:
+                self._json({"error": "Sign in first."}, 401)
             elif self.path == "/api/state":
                 self._json(app.snapshot())
             elif self.path == "/api/backtest":
@@ -445,17 +495,28 @@ def make_handler(app: App):
                 self._json({"error": "Not found"}, 404)
 
         def do_POST(self):
+            if not self._allowed():
+                return
             # The custom header cannot be sent by another website's page, so
             # only this app's own page can press its buttons.
-            if not self._local() or self.headers.get("X-Trader") != "1":
-                if self._local():
-                    self._json({"error": "Forbidden"}, 403)
-                return
+            if self.headers.get("X-Trader") != "1":
+                return self._json({"error": "Forbidden"}, 403)
             try:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length) or b"{}")
             except ValueError:
                 return self._json({"error": "Bad request"}, 400)
+            if not isinstance(body, dict):
+                return self._json({"error": "Bad request"}, 400)
+
+            if self.path == "/api/login":
+                status, error = app.login(body.get("password", "")) if app.password else (200, "")
+                cookie = self._session_cookie(app.new_session()) if status == 200 and app.password else None
+                return self._json({"error": error}, status, cookie)
+            if self.path == "/api/logout":
+                return self._json({"error": ""}, 200, self._session_cookie("", expire=True))
+            if not self._signed_in():
+                return self._json({"error": "Sign in first."}, 401)
 
             if self.path == "/api/check":
                 started = app.start_check(send_email=bool(body.get("email")))
@@ -477,29 +538,48 @@ def make_handler(app: App):
                 self._json({"error": app.start_screen(body)})
             elif self.path == "/api/test-email":
                 self._json({"message": app.send_test_email()})
-            elif self.path == "/api/quit":
+            elif self.path == "/api/quit" and not app.hosted:
                 # Sent by a newer copy that is starting up and needs the port.
                 self._json({"error": ""})
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
             else:
                 self._json({"error": "Not found"}, 404)
 
-        def _local(self) -> bool:
-            """Refuse requests that reach this server under another site's name."""
+        def _allowed(self) -> bool:
+            """On your own computer, refuse requests that arrive under another site's name."""
             host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
-            if host in ("127.0.0.1", "localhost"):
+            if app.hosted or host in ("127.0.0.1", "localhost"):
                 return True
             self._json({"error": "Forbidden"}, 403)
             return False
 
-        def _json(self, payload: dict, status: int = 200) -> None:
-            self._send(status, json.dumps(payload).encode(), "application/json")
+        def _signed_in(self) -> bool:
+            if not app.password:
+                return True
+            cookie = SimpleCookie(self.headers.get("Cookie") or "").get("trader_session")
+            return cookie is not None and app.valid_session(cookie.value)
 
-        def _send(self, status: int, body: bytes, content_type: str) -> None:
+        def _session_cookie(self, value: str, expire: bool = False) -> str:
+            age = 0 if expire else SESSION_DAYS * 86400
+            cookie = f"trader_session={value}; Path=/; Max-Age={age}; HttpOnly; SameSite=Strict"
+            # Behind a hosting service's HTTPS, never send the pass over plain HTTP.
+            if self.headers.get("X-Forwarded-Proto") == "https":
+                cookie += "; Secure"
+            return cookie
+
+        def _json(self, payload: dict, status: int = 200, cookie: str | None = None) -> None:
+            self._send(status, json.dumps(payload).encode(), "application/json", cookie)
+
+        def _send(self, status: int, body: bytes, content_type: str, cookie: str | None = None) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "no-referrer")
+            if cookie:
+                self.send_header("Set-Cookie", cookie)
             self.end_headers()
             self.wfile.write(body)
 
@@ -509,8 +589,8 @@ def make_handler(app: App):
     return Handler
 
 
-def serve(app: App, port: int) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app))
+def serve(app: App, port: int, host: str = "127.0.0.1") -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer((host, port), make_handler(app))
     threading.Thread(target=app.run_auto, daemon=True).start()
     return server
 
@@ -530,14 +610,40 @@ def stop_running_copy(url: str) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_env_file(ROOT / ".env")
+    # A hosting service names the port to listen on; that also means "be
+    # reachable from outside" instead of from this computer only.
+    on_host = "PORT" in os.environ
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT") or 8765))
+    parser.add_argument("--host", default=os.environ.get("TRADER_HOST")
+                        or ("0.0.0.0" if on_host else "127.0.0.1"))
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args(argv)
-    load_env_file(ROOT / ".env")
+
+    password = os.environ.get("TRADER_PASSWORD", "")
+    hosted = args.host not in ("127.0.0.1", "localhost")
+    if hosted and len(password) < MIN_PASSWORD:
+        print("Trader will not start where others can reach it without a password.")
+        print(f"Set TRADER_PASSWORD to a password of at least {MIN_PASSWORD} characters.")
+        return 1
+    # Where the watchlist, your settings and the alert history are kept.
+    data = Path(os.environ.get("TRADER_DATA_DIR") or ROOT)
+    data.mkdir(parents=True, exist_ok=True)
+    app = App(data / "watchlist.txt", ROOT / "config.toml", data / ".state",
+              local_config=data / "config.local.toml", password=password, hosted=hosted)
+
+    if hosted:
+        server = serve(app, args.port, args.host)
+        print(f"Trader is running on port {args.port}. Data is kept in {data}.", flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        server.server_close()
+        return 0
 
     url = f"http://127.0.0.1:{args.port}"
-    app = App(ROOT / "watchlist.txt", ROOT / "config.toml", ROOT / ".state")
     try:
         server = serve(app, args.port)
     except OSError:

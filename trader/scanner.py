@@ -91,22 +91,21 @@ def new_signals(results: list[StockResult], state: AlertState, config: dict) -> 
 
 def email_signals(fresh: list[Signal], state: AlertState) -> str:
     """Email the signals and remember them. Returns the recipient address."""
-    sender, password, recipient = emailer.credentials()
-    emailer.send(emailer.build_message(fresh, sender, recipient), sender, password)
+    recipient = emailer.send_alerts(fresh)
     # Recorded only after a successful send, so a failed send is retried.
     state.record(fresh)
     state.save()
     return recipient
 
 
-def load_config(path: Path) -> dict:
+def load_config(path: Path, local: Path | None = None) -> dict:
     """Settings from config.toml, with config.local.toml (if any) laid on top.
 
     The local file holds only the settings the user changed, so updates can
     replace config.toml without losing them.
     """
     config = tomllib.loads(path.read_text())
-    local = path.with_name("config.local.toml")
+    local = local or path.with_name("config.local.toml")
     if local.exists():
         _merge(config, tomllib.loads(local.read_text()))
     return config

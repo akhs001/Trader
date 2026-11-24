@@ -132,8 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     load_env_file(ROOT / ".env")
 
     if args.test_email:
-        sender, password, recipient = emailer.credentials()
-        emailer.send(emailer.test_message(sender, recipient), sender, password)
+        recipient = emailer.send_test()
         print(f"Test email sent to {recipient}.")
         return 0
     if args.loop:

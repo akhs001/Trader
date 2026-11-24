@@ -1,9 +1,17 @@
-"""Builds and sends the alert email through Gmail."""
+"""Builds the alert email and sends it, through Gmail or through Resend.
+
+Gmail (SMTP) is used on your own computer. Hosting services such as Railway
+block SMTP, so there the email goes through Resend's web API instead: set
+RESEND_API_KEY and ALERT_TO.
+"""
 
 from __future__ import annotations
 
+import json
 import os
 import smtplib
+import urllib.error
+import urllib.request
 from email.message import EmailMessage
 from html import escape
 
@@ -19,21 +27,91 @@ DISCLAIMER = (
 )
 
 
+RESEND_URL = "https://api.resend.com/emails"
+# Resend's shared sender: it delivers only to the address of the Resend account.
+RESEND_SENDER = "Trader <onboarding@resend.dev>"
+
+
 class EmailConfigError(Exception):
     pass
 
 
+class EmailSendError(OSError):
+    """The email service refused the message."""
+
+
+def uses_resend() -> bool:
+    return bool(os.environ.get("RESEND_API_KEY", "").strip())
+
+
 def credentials() -> tuple[str, str, str]:
-    """Return (gmail_address, app_password, recipient) from the environment."""
+    """Return (sender, secret, recipient) from the environment.
+
+    The secret is the Resend API key when one is set, else the Gmail app password.
+    """
     address = os.environ.get("GMAIL_ADDRESS", "").strip()
+    recipient = os.environ.get("ALERT_TO", "").strip() or address
+    if uses_resend():
+        if not recipient:
+            raise EmailConfigError(
+                "Email is not set up: set ALERT_TO to the address that should get the alerts."
+            )
+        sender = (os.environ.get("ALERT_FROM", "").strip()
+                  or os.environ.get("ALERT_FROM_EMAIL", "").strip() or RESEND_SENDER)
+        return sender, os.environ["RESEND_API_KEY"].strip(), recipient
     password = os.environ.get("GMAIL_APP_PASSWORD", "").replace(" ", "")
     if not address or not password:
         raise EmailConfigError(
-            "Email is not set up: put GMAIL_ADDRESS and GMAIL_APP_PASSWORD "
-            "in the .env file. See README.md."
+            "Email is not set up. On your own computer, put GMAIL_ADDRESS and "
+            "GMAIL_APP_PASSWORD in the .env file. On a hosting service, set "
+            "RESEND_API_KEY and ALERT_TO. See README.md."
         )
-    recipient = os.environ.get("ALERT_TO", "").strip() or address
     return address, password, recipient
+
+
+def send_alerts(signals: list[Signal]) -> str:
+    """Email the signals. Returns the address they went to."""
+    sender, secret, recipient = credentials()
+    deliver(build_message(signals, sender, recipient), sender, secret)
+    return recipient
+
+
+def send_test() -> str:
+    """Send a test email. Returns the address it went to."""
+    sender, secret, recipient = credentials()
+    deliver(test_message(sender, recipient), sender, secret)
+    return recipient
+
+
+def deliver(message: EmailMessage, sender: str, secret: str) -> None:
+    if uses_resend():
+        send_resend(message, secret)
+    else:
+        send(message, sender, secret)
+
+
+def send_resend(message: EmailMessage, api_key: str) -> None:
+    """Send through Resend's web API (works where SMTP is blocked)."""
+    payload = {"from": message["From"], "to": [message["To"]], "subject": message["Subject"]}
+    text, html = message.get_body(("plain",)), message.get_body(("html",))
+    if text is not None:
+        payload["text"] = text.get_content()
+    if html is not None:
+        payload["html"] = html.get_content()
+    request = urllib.request.Request(
+        RESEND_URL, data=json.dumps(payload).encode(),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+                 "User-Agent": "trader/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30):
+            pass
+    except urllib.error.HTTPError as error:
+        try:
+            reason = json.load(error).get("message", "")
+        except (ValueError, AttributeError):
+            reason = ""
+        raise EmailSendError(f"Resend refused the email ({error.code}): {reason or error.reason}") from error
 
 
 def build_message(signals: list[Signal], sender: str, recipient: str) -> EmailMessage:
