@@ -109,6 +109,10 @@
   .entry a { font-size: 13px; color: var(--accent); }
 
   .table-wrap { overflow-x: auto; }
+  td a { color: inherit; }
+  td .small { white-space: normal; min-width: 200px; font-weight: 400; }
+  .status-cell .sym-cell { color: var(--text); font-weight: 600; }
+  td .side { display: inline-block; }
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
   th { text-align: left; font-size: 12px; font-weight: 600; color: var(--muted); padding: 0 10px 8px 0; white-space: nowrap; }
   td { padding: 9px 10px 9px 0; border-top: 1px solid var(--line); white-space: nowrap; }
@@ -142,6 +146,7 @@
 
   <nav class="tabs" role="tablist">
     <button class="tab" id="tabbtn-entries" data-tab="entries" role="tab">Entries</button>
+    <button class="tab" id="tabbtn-scanner" data-tab="scanner" role="tab">Scanner</button>
     <button class="tab" id="tabbtn-backtest" data-tab="backtest" role="tab">Backtest</button>
   </nav>
 
@@ -191,6 +196,28 @@
     </form>
     <div class="form-error" id="add-error"></div>
   </section>
+  </div>
+
+  <div id="tab-scanner" hidden>
+    <section class="card">
+      <div class="filters">
+        <label>Stocks <select id="sc-universe"></select></label>
+        <label>Strategy <select id="sc-strategy"></select></label>
+        <label>Direction
+          <select id="sc-direction">
+            <option value="both">Long and short</option>
+            <option value="long">Long only</option>
+            <option value="short">Short only</option>
+          </select>
+        </label>
+      </div>
+      <div class="controls">
+        <button class="primary" id="sc-run">Scan market</button>
+      </div>
+      <div class="bar" id="sc-bar"><span></span></div>
+      <div class="status" id="sc-status"></div>
+    </section>
+    <div id="sc-results"></div>
   </div>
 
   <div id="tab-backtest" hidden>
@@ -307,7 +334,7 @@ async function refresh() {
   }
   render();
   // Poll quickly during a check or backtest, and often enough to show automatic checks.
-  const busy = state && (state.scan.running || (state.backtest || {}).running);
+  const busy = state && (state.scan.running || (state.backtest || {}).running || (state.screen || {}).running);
   const pause = !state ? 10000 : busy ? 700 : state.auto.enabled ? 3000 : 10000;
   timer = setTimeout(refresh, pause);
 }
@@ -342,6 +369,8 @@ function render() {
   // Strategy and direction for checks
   fillStrategies($("strategy"), state.strategies || []);
   fillStrategies($("bt-strategy"), state.strategies || []);
+  fillStrategies($("sc-strategy"), state.strategies || []);
+  renderScannerControls();
   const selection = state.selection || {strategy: "all", direction: "both"};
   if (document.activeElement !== $("strategy")) $("strategy").value = selection.strategy;
   if (document.activeElement !== $("direction")) $("direction").value = selection.direction;
@@ -454,14 +483,105 @@ async function saveSelection() {
 
 // ---- tabs --------------------------------------------------------------------
 
+const TABS = ["entries", "scanner", "backtest"];
+
 function showTab(name) {
-  for (const tab of ["entries", "backtest"]) {
+  for (const tab of TABS) {
     $("tab-" + tab).hidden = tab !== name;
     $("tabbtn-" + tab).className = "tab" + (tab === name ? " on" : "");
     $("tabbtn-" + tab).setAttribute("aria-selected", tab === name);
   }
   try { localStorage.setItem("trader-tab", name); } catch (error) {}
   if (name === "backtest") drawCurve();
+}
+
+// ---- scanner -----------------------------------------------------------------
+
+let screenRun = null;     // the scan whose result is on screen
+let screenResult = null;
+let screenFormError = "";
+
+function renderScannerControls() {
+  const run = state.screen || {running: false, run: 0, total: 0, done: 0};
+  const select = $("sc-universe");
+  if (!select.options.length) {
+    for (const item of state.universes || []) select.append(el("option", {value: item.id, text: item.name}));
+  }
+  $("sc-run").disabled = run.running || !state.setup.data;
+  $("sc-run").textContent = run.running ? "Scanning…" : "Scan market";
+  $("sc-bar").className = "bar" + (run.running ? " on" : "");
+  $("sc-bar").firstElementChild.style.width = run.total ? (100 * run.done / run.total) + "%" : "0";
+  let status = "";
+  if (run.running) status = run.message || ("Checked " + run.done + " of " + run.total + " stocks");
+  else if (screenFormError) status = screenFormError;
+  else if (run.error) status = run.error;
+  else if (!screenResult) status = "Looks through a whole list of stocks for entries today. A large list takes a few minutes.";
+  $("sc-status").textContent = status;
+  if (!run.running && run.run !== screenRun) loadScreen(run.run);
+}
+
+async function loadScreen(run) {
+  screenRun = run;
+  if (state.screen.error) {
+    screenResult = null;
+  } else {
+    try {
+      screenResult = (await (await fetch("/api/screen")).json()).result;
+    } catch (error) { return; }
+  }
+  if (screenResult) $("sc-status").textContent = "";
+  renderScreen();
+}
+
+function renderScreen() {
+  const box = $("sc-results");
+  box.replaceChildren();
+  const result = screenResult;
+  if (!result) return;
+  box.append(el("h2", {text: result.name + ", " + selectionLabel(result.strategy, result.direction) + ": " +
+    plural(result.hits.length, "stock") + " with a possible entry"}));
+  const summary = "Checked " + plural(result.scanned, "stock") + " at " + result.finished +
+    (result.failed ? "; " + result.failed + " had no prices." : ".");
+  if (!result.hits.length) {
+    box.append(el("section", {class: "card"}, el("div", {class: "empty", text: summary + " No entries right now."})));
+    return;
+  }
+  const table = el("table", {class: "compact"}, el("thead", {}, el("tr", {},
+    el("th", {text: "Stock"}), el("th", {text: "Side"}), el("th", {text: "Signal"}),
+    el("th", {class: "num", text: "Today"}), el("th", {class: "num", text: "Entry"}),
+    el("th", {class: "num", text: "SL"}), el("th", {class: "num", text: "TP1"}),
+    el("th", {class: "num", text: "TP2"}), el("th", {}))));
+  const body = el("tbody");
+  for (const row of result.hits) {
+    for (const entry of row.entries) {
+      const levels = Object.fromEntries(((entry.plan || {}).levels || []).map((level) => [level.label, level.price]));
+      const onList = state.watchlist.includes(row.symbol);
+      const add = el("button", {text: onList ? "Added" : "+ Watch",
+        title: onList ? row.symbol + " is on your watchlist" : "Add " + row.symbol + " to your watchlist"});
+      add.disabled = onList;
+      add.addEventListener("click", async () => {
+        add.disabled = true;
+        await post("/api/watchlist/add", {symbol: row.symbol});
+        await refresh();
+        renderScreen();
+      });
+      const signal = el("td", {class: "status-cell"},
+        el("div", {class: "sym-cell", text: entry.signals.map((item) => item.title).join(", ")}),
+        el("div", {class: "small", text: entry.signals[0].reason}));
+      body.append(el("tr", {},
+        el("td", {class: "sym-cell"}, el("a", {href: "https://finance.yahoo.com/chart/" + encodeURIComponent(row.symbol),
+          target: "_blank", rel: "noopener", text: row.symbol})),
+        el("td", {}, el("span", {class: "side " + entry.direction, text: entry.direction === "short" ? "SHORT" : "LONG"})),
+        signal,
+        el("td", {class: "num " + (row.change_pct >= 0 ? "up" : "down"), text: percent(row.change_pct)}),
+        el("td", {class: "num", text: levels.Entry || ""}), el("td", {class: "num down", text: levels.SL || ""}),
+        el("td", {class: "num up", text: levels.TP1 || levels.TP || ""}), el("td", {class: "num up", text: levels.TP2 || ""}),
+        el("td", {}, add)));
+    }
+  }
+  table.append(body);
+  box.append(el("section", {class: "card"}, el("div", {class: "table-wrap"}, table),
+    el("div", {class: "small", text: summary + " Click a ticker to open its chart."})));
 }
 
 // ---- backtest ----------------------------------------------------------------
@@ -758,14 +878,21 @@ $("email").addEventListener("change", () => {
   try { localStorage.setItem("trader-email", $("email").checked ? "on" : "off"); } catch (error) {}
 });
 
-for (const tab of ["entries", "backtest"]) $("tabbtn-" + tab).addEventListener("click", () => showTab(tab));
+for (const tab of TABS) $("tabbtn-" + tab).addEventListener("click", () => showTab(tab));
 let startTab = "entries";
-try { startTab = localStorage.getItem("trader-tab") === "backtest" ? "backtest" : "entries"; } catch (error) {}
+try { startTab = TABS.includes(localStorage.getItem("trader-tab")) ? localStorage.getItem("trader-tab") : "entries"; } catch (error) {}
 showTab(startTab);
 $("strategy").addEventListener("change", saveSelection);
 $("direction").addEventListener("change", saveSelection);
 $("timeframe").addEventListener("change", saveSelection);
 $("bt-timeframe").addEventListener("change", () => { if (state) renderBacktestControls(); });
+$("sc-run").addEventListener("click", async () => {
+  $("sc-run").disabled = true;
+  const result = await post("/api/screen", {universe: $("sc-universe").value,
+    strategy: $("sc-strategy").value, direction: $("sc-direction").value});
+  screenFormError = result.error || "";
+  refresh();
+});
 $("bt-hold").addEventListener("change", () => { if (state) renderBacktestControls(); });
 $("bt-run").addEventListener("click", async () => {
   $("bt-run").disabled = true;

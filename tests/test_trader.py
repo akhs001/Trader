@@ -603,6 +603,54 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(report["rows"][0]["name"], "Breakout")
 
 
+class UniverseTests(unittest.TestCase):
+    def test_saved_lists(self):
+        from trader import universe
+        for name, size in (("nasdaq100", 90), ("sp500", 480), ("dowjones", 30)):
+            symbols = universe._saved_index(name)
+            self.assertGreaterEqual(len(symbols), size)
+            self.assertTrue(all(universe.SYMBOL.match(symbol) for symbol in symbols))
+        self.assertIn("BRK-B", universe._saved_index("sp500"))  # Yahoo's spelling, not BRK.B
+
+    def test_download_with_fallback_to_the_saved_list(self):
+        import io, urllib.error
+        from unittest import mock
+        from trader import universe
+        listing = "Symbol,Name\n" + "".join(f"T{i},Company {i}\n" for i in range(25)) + "brk.b,Berkshire\nbad symbol!,X\n"
+        with mock.patch.object(universe.urllib.request, "urlopen", lambda request, timeout=0: io.BytesIO(listing.encode())):
+            symbols = universe.load("dowjones")
+        self.assertEqual((len(symbols), symbols[0], symbols[-1]), (26, "T0", "BRK-B"))
+
+        def offline(request, timeout=0):
+            raise urllib.error.URLError("no network")
+        with mock.patch.object(universe.urllib.request, "urlopen", offline):
+            self.assertEqual(universe.load("dowjones"), universe._saved_index("dowjones"))
+        with self.assertRaises(DataError):
+            universe.load("mars")
+
+    def test_batch_download_reports_each_stock(self):
+        try:
+            import pandas
+        except ImportError:
+            self.skipTest("pandas is not installed")
+        import sys, types
+        from unittest import mock
+        from trader import data
+        index = pandas.DatetimeIndex(["2024-01-02", "2024-01-03"], tz="America/New_York")
+        fields = ["Open", "High", "Low", "Close", "Volume"]
+        columns = pandas.MultiIndex.from_product([["AAA", "BBB"], fields])
+        table = pandas.DataFrame([[1, 2, 0.5, 1.5, 10] + [None] * 5, [2, 3, 1.5, 2.5, 20] + [None] * 5],
+                                 index=index, columns=columns)
+        fake = types.SimpleNamespace(download=lambda symbols, **options: table)
+        with mock.patch.dict(sys.modules, {"yfinance": fake}):
+            found = dict(data.fetch_many(["AAA", "BBB", "CCC"]))
+            with self.assertRaises(data.SetupError):
+                list(data.fetch_many(["AAA"], source="twelvedata"))
+        self.assertEqual(found["AAA"].closes, [1.5, 2.5])
+        self.assertIsInstance(found["BBB"], DataError)   # all prices missing
+        self.assertIsInstance(found["CCC"], DataError)   # not in the answer at all
+
+
 class DataTests(unittest.TestCase):
     def payload(self):
         # Shape of a real Twelve Data /time_series response: newest first, numbers as strings.
@@ -1016,6 +1064,41 @@ class AppTests(unittest.TestCase):
         self.assertEqual(scan["timeframe"], "1h")
         self.assertIn("20-hour high", scan["results"][0]["entries"][0]["signals"][0]["reason"])
         self.assertEqual(self.call("/api/state")[1]["selection"]["timeframe"], "1h")
+
+    def test_market_scan(self):
+        from unittest import mock
+        from trader import app as app_module
+
+        def many(symbols, source="yahoo", batch=25):
+            for symbol in symbols:
+                if symbol == "NOPE":
+                    yield symbol, DataError("NOPE: no price data")
+                elif symbol == "FLAT":
+                    yield symbol, make_history([100.0] * 260)
+                else:
+                    history = make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
+                    history.symbol = symbol
+                    yield symbol, history
+
+        self.assertIn("Choose", self.call("/api/screen", {"universe": "mars"})[1]["error"])
+        names = [item["id"] for item in self.call("/api/state")[1]["universes"]]
+        self.assertEqual(names[:3], ["nasdaq100", "sp500", "dowjones"])
+        with mock.patch.object(app_module, "fetch_many", many), \
+             mock.patch.object(app_module.universe, "load", lambda name: ["AAA", "FLAT", "NOPE", "ZZZ"]):
+            body = {"universe": "dowjones", "strategy": "breakout", "direction": "long"}
+            self.assertEqual(self.call("/api/screen", body)[1]["error"], "")
+            for _ in range(2000):
+                status = self.call("/api/state")[1]["screen"]
+                if not status["running"]:
+                    break
+        self.assertEqual((status["error"], status["done"], status["total"]), ("", 4, 4))
+        result = self.call("/api/screen")[1]["result"]
+        self.assertEqual((result["name"], result["scanned"], result["failed"]), ("Dow Jones 30", 3, 1))
+        self.assertEqual([hit["symbol"] for hit in result["hits"]], ["AAA", "ZZZ"])
+        entry = result["hits"][0]["entries"][0]
+        self.assertEqual([s["title"] for s in entry["signals"]], ["Breakout"])
+        self.assertEqual(entry["plan"]["levels"][1]["label"], "SL")
+        self.assertEqual(self.sent, [])  # a scan never emails
 
     def test_page_is_told_when_the_program_was_updated(self):
         from unittest import mock

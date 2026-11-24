@@ -95,6 +95,35 @@ def fetch_hourly(symbol: str, source: str = DEFAULT_SOURCE, notify=print, days: 
     return fetch_yahoo(symbol, period=f"{min(days, 730)}d", interval="1h")
 
 
+def fetch_many(symbols: list[str], source: str = DEFAULT_SOURCE, batch: int = 25):
+    """Download daily candles for many stocks, a batch at a time.
+
+    Yields (symbol, History) for each stock that has prices and
+    (symbol, DataError) for each that does not. Only Yahoo can do this:
+    Twelve Data's free plan allows too few requests.
+    """
+    if source != "yahoo":
+        raise SetupError('Scanning a whole market needs the "yahoo" price source.')
+    yfinance = _yfinance()
+    logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+    for start in range(0, len(symbols), batch):
+        group = symbols[start:start + batch]
+        try:
+            table = yfinance.download(group, period="2y", interval="1d", auto_adjust=True,
+                                      group_by="ticker", threads=True, progress=False)
+        except Exception as error:  # yfinance raises many different error types
+            for symbol in group:
+                yield symbol, DataError(f"{symbol}: could not download prices ({error})")
+            continue
+        for symbol in group:
+            try:
+                # One table for the whole batch, with a block of columns per stock.
+                frame = table[symbol] if symbol in table.columns.get_level_values(0) else None
+                yield symbol, history_from_frame(symbol, frame)
+            except DataError as error:
+                yield symbol, error
+
+
 def fetch_yahoo(symbol: str, period: str = "2y", interval: str = "1d") -> History:
     yfinance = _yfinance()
     # yfinance reports problems through its logger; keep the console clean and

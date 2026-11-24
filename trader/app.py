@@ -21,11 +21,12 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import backtest, emailer, market
-from .data import DataError, SetupError, check_setup, fetch_history, fetch_hourly, source_of
+from . import backtest, emailer, market, universe
+from .data import (DataError, SetupError, check_setup, fetch_history, fetch_hourly, fetch_many,
+                   source_of)
 from .main import GMAIL_LOGIN_HELP, ROOT, load_env_file
 from .scanner import (StockResult, check_watchlist, email_signals, load_config,
-                      load_watchlist, new_signals)
+                      load_watchlist, new_signals, scan_history)
 from .signals import STRATEGIES
 from .state import AlertState
 
@@ -71,6 +72,8 @@ class App:
         self.backtest = {"running": False, "done": 0, "total": 0, "current": "", "message": "",
                          "error": "", "run": 0}
         self.backtest_result: dict | None = None
+        self.screen = {"running": False, "done": 0, "total": 0, "message": "", "error": "", "run": 0}
+        self.screen_result: dict | None = None
 
     # --- what the page shows -------------------------------------------------
 
@@ -87,6 +90,8 @@ class App:
             "selection": {"strategy": self.strategy, "direction": self.direction,
                           "timeframe": "1h" if self.hourly else "1d"},
             "backtest": dict(self.backtest),
+            "screen": dict(self.screen),
+            "universes": [{"id": key, "name": name} for key, (name, _) in universe.UNIVERSES.items()],
             "market": {"open": market.is_scan_time(), "time": now.strftime("%a %H:%M")},
             "setup": self._setup(),
             # True once update.bat has replaced the program files: the page is
@@ -204,6 +209,56 @@ class App:
             "strategy": self.strategy, "direction": self.direction,
             "timeframe": "1h" if self.hourly else "1d",
         }))
+
+    # --- scanning a whole market ---------------------------------------------
+
+    def start_screen(self, body: dict) -> str:
+        """Start scanning a list of stocks in the background. Returns an error or ''."""
+        market_id = body.get("universe")
+        if market_id not in universe.UNIVERSES:
+            return "Choose which stocks to scan."
+        strategy = body.get("strategy") if body.get("strategy") in STRATEGIES else "all"
+        direction = body.get("direction") if body.get("direction") in ("long", "short") else "both"
+        with self.lock:
+            if self.screen["running"]:
+                return "A scan is already running."
+            self.screen.update(running=True, done=0, total=0, error="",
+                               message="Loading the list of stocks")
+        threading.Thread(target=self._screen, args=(market_id, strategy, direction),
+                         daemon=True).start()
+        return ""
+
+    def _screen(self, market_id: str, strategy: str, direction: str) -> None:
+        error = ""
+        try:
+            config = self._config()
+            symbols = universe.load(market_id)
+            self._screen_progress(total=len(symbols), message="")
+            hits, failed = [], 0
+            for done, (symbol, history) in enumerate(fetch_many(symbols, source_of(config)), start=1):
+                if isinstance(history, DataError):
+                    failed += 1
+                else:
+                    result = scan_history(history, config, strategy, direction)
+                    if result.signals:
+                        hits.append(_row(result, set()))
+                self._screen_progress(done=done)
+            self.screen_result = {
+                "universe": market_id, "name": universe.UNIVERSES[market_id][0],
+                "strategy": strategy, "direction": direction, "hits": hits,
+                "scanned": len(symbols) - failed, "failed": failed,
+                "finished": datetime.now().strftime("%H:%M:%S"),
+            }
+        except (SetupError, DataError) as problem:
+            error = str(problem)
+        except Exception as problem:  # show the problem on the page instead of dying silently
+            error = f"The scan failed: {problem}"
+        with self.lock:
+            self.screen.update(running=False, message="", error=error, run=self.screen["run"] + 1)
+
+    def _screen_progress(self, **changes) -> None:
+        with self.lock:
+            self.screen.update(changes)
 
     # --- backtesting ---------------------------------------------------------
 
@@ -384,6 +439,8 @@ def make_handler(app: App):
                 self._json(app.snapshot())
             elif self.path == "/api/backtest":
                 self._json({"result": app.backtest_result})
+            elif self.path == "/api/screen":
+                self._json({"result": app.screen_result})
             else:
                 self._json({"error": "Not found"}, 404)
 
@@ -416,6 +473,8 @@ def make_handler(app: App):
                 self._json({"error": ""})
             elif self.path == "/api/backtest":
                 self._json({"error": app.start_backtest(body)})
+            elif self.path == "/api/screen":
+                self._json({"error": app.start_screen(body)})
             elif self.path == "/api/test-email":
                 self._json({"message": app.send_test_email()})
             elif self.path == "/api/quit":

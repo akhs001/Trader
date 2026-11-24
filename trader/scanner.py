@@ -46,8 +46,14 @@ def check_stock(symbol: str, config: dict, notify=print, strategy: str = "all",
             history = fetch_history(symbol, source=source_of(config), notify=notify)
     except DataError as error:
         return StockResult(symbol, error=str(error).removeprefix(f"{symbol}: "))
+    return scan_history(history, config, strategy, direction)
+
+
+def scan_history(history, config: dict, strategy: str = "all",
+                 direction: str = "both") -> StockResult:
+    """Look for entry signals in prices that are already downloaded."""
     result = StockResult(
-        symbol,
+        history.symbol,
         price=history.closes[-1],
         date=history.dates[-1],
         facts=signals.facts(history),
@@ -56,7 +62,7 @@ def check_stock(symbol: str, config: dict, notify=print, strategy: str = "all",
     if len(history.closes) >= 2:
         result.change_pct = signals.day_change(history)
     if len(history.closes) < MIN_BARS:
-        unit = "hours" if hourly else "days"
+        unit = "hours" if history.hourly else "days"
         result.note = f"only {len(history.closes)} {unit} of history"
     return result
 
