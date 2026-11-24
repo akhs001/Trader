@@ -289,7 +289,7 @@ class DataTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"TWELVE_DATA_API_KEY": "test-key"}), \
              mock.patch.object(data.urllib.request, "urlopen", fake_urlopen), \
              mock.patch.object(data.time, "sleep") as sleep:
-            return data.fetch_history("AAPL"), sleep
+            return data.fetch_history("AAPL", source="twelvedata"), sleep
 
     def test_fetch_success(self):
         history, _ = self.fetch_with(self.payload())
@@ -311,13 +311,36 @@ class DataTests(unittest.TestCase):
             self.fetch_with({"code": 404, "status": "error", "message": "symbol not found"})
         self.assertIn("symbol not found", str(raised.exception))
 
+    def test_yahoo_table_is_converted(self):
+        try:
+            import pandas
+        except ImportError:
+            self.skipTest("pandas is not installed")
+        from trader import data
+        index = pandas.DatetimeIndex(["2024-01-02", "2024-01-03", "2024-01-04"], tz="America/New_York")
+        frame = pandas.DataFrame({
+            "Open": [10.0, None, 12.0], "High": [11.0, None, 13.0], "Low": [9.0, None, 11.0],
+            "Close": [10.5, None, 12.5], "Volume": [100, None, 300], "Dividends": [0, 0, 0],
+        }, index=index)
+        history = data.history_from_frame("AAPL", frame)
+        self.assertEqual(history.dates, ["2024-01-02", "2024-01-04"])
+        self.assertEqual(history.closes, [10.5, 12.5])
+        self.assertEqual(history.volumes, [100.0, 300.0])
+        with self.assertRaises(DataError):
+            data.history_from_frame("NOPE", frame.iloc[0:0])
+
+    def test_unknown_source(self):
+        from trader import data
+        with self.assertRaises(data.SetupError):
+            data.fetch_history("AAPL", source="somewhere")
+
     def test_missing_key(self):
         import os
         from unittest import mock
         from trader import data
         with mock.patch.dict(os.environ, {"TWELVE_DATA_API_KEY": ""}):
             with self.assertRaises(ApiKeyError):
-                data.fetch_history("AAPL")
+                data.fetch_history("AAPL", source="twelvedata")
 
 
 class StateAndEmailTests(unittest.TestCase):
@@ -427,10 +450,10 @@ class AppTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         (root / "watchlist.txt").write_text("AAA\nBBB\n")
-        (root / "config.toml").write_text("[schedule]\ninterval_minutes = 15\n")
+        (root / "config.toml").write_text("[data]\nsource = \"twelvedata\"\n[schedule]\ninterval_minutes = 15\n")
         self.sent = []
 
-        def fake_fetch(symbol, notify=print):
+        def fake_fetch(symbol, source="yahoo", notify=print):
             if symbol == "BBB":
                 raise DataError("BBB: symbol not found")
             history = make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])

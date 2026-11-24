@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import emailer, market
-from .data import ApiKeyError, api_key
+from .data import SetupError, check_setup, source_of
 from .main import GMAIL_LOGIN_HELP, ROOT, load_env_file
 from .scanner import (StockResult, check_watchlist, email_signals, load_config,
                       load_watchlist, new_signals)
@@ -58,11 +58,12 @@ class App:
         }
 
     def _setup(self) -> dict:
-        setup = {"data": True, "email": True, "email_to": ""}
+        setup = {"data": True, "data_problem": "", "email": True, "email_to": ""}
         try:
-            api_key()
-        except ApiKeyError:
+            check_setup(source_of(self._config()))
+        except SetupError as problem:
             setup["data"] = False
+            setup["data_problem"] = str(problem)
         try:
             setup["email_to"] = emailer.credentials()[2]
         except emailer.EmailConfigError:
@@ -110,7 +111,7 @@ class App:
                     email = GMAIL_LOGIN_HELP
                 except (smtplib.SMTPException, OSError) as problem:
                     email = f"The email could not be sent: {problem}"
-        except ApiKeyError as problem:
+        except SetupError as problem:
             error = str(problem)
         except Exception as problem:  # show the problem on the page instead of dying silently
             error = f"The check failed: {problem}"

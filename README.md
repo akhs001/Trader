@@ -7,7 +7,9 @@ you. It only alerts; it never places trades.
 
 ## Signals
 
-All signals use daily candles from [Twelve Data](https://twelvedata.com).
+All signals use daily candles from Yahoo Finance, read through the
+[yfinance](https://github.com/ranaroussi/yfinance) package. During market hours
+today's unfinished candle is included, so a check uses the current price.
 
 | Signal | Fires when |
 | --- | --- |
@@ -53,24 +55,23 @@ stays quiet for `cooldown_days` (default 5).
 ## Setup
 
 1. **Install Python 3.11 or newer** from <https://www.python.org/downloads/>.
-   On Windows, tick "Add python.exe to PATH" in the installer. Nothing else
-   needs installing.
+   On Windows, tick "Add python.exe to PATH" in the installer. `start.bat`
+   installs the one package Trader needs (yfinance) the first time it runs.
 2. **Download this project** to your computer: on GitHub, *Code → Download
    ZIP*, then unzip it.
-3. **Get a free Twelve Data API key.** Sign up at <https://twelvedata.com>
-   and copy the API key from your dashboard.
-4. **Create a Gmail app password.** Turn on 2-Step Verification for your
+3. **Create a Gmail app password.** Turn on 2-Step Verification for your
    Google account, then create a password at
    <https://myaccount.google.com/apppasswords>. It is 16 letters long.
-5. **Add your details.** Copy `.env.example` to a new file named `.env` in the
-   same folder and fill in the API key, your Gmail address and the app password.
-6. **Set your watchlist** in the app, or edit `watchlist.txt` (one ticker per
+4. **Add your email details.** Copy `.env.example` to a new file named `.env`
+   in the same folder and fill in your Gmail address and the app password.
+5. **Set your watchlist** in the app, or edit `watchlist.txt` (one ticker per
    line).
 
 ## Running
 
 On Windows, double-click `start.bat`. On Mac or Linux, run
-`python3 -m trader.app` in the project folder. Trader opens in your browser at
+`python3 -m pip install -r requirements.txt` once, then `python3 -m trader.app`
+in the project folder. Trader opens in your browser at
 <http://127.0.0.1:8765>. Keep the small console window open while you use it;
 closing it stops Trader.
 
@@ -87,9 +88,21 @@ closing it stops Trader.
 The page only answers on your own computer; it is not reachable from the
 network.
 
-Each check uses one Twelve Data request per stock. The free plan limits
-requests per minute and per day: with a long watchlist a check pauses when it
-reaches the per-minute limit and continues by itself.
+### Price source
+
+Yahoo Finance needs no key and has no per-minute limit, but yfinance is an
+unofficial library: if prices stop loading one day, update it with
+`py -m pip install -U yfinance`. As a fallback, Trader can read prices from
+[Twelve Data](https://twelvedata.com) instead: put `TWELVE_DATA_API_KEY` in
+`.env` and this in `config.local.toml`:
+
+```toml
+[data]
+source = "twelvedata"
+```
+
+Its free plan allows 8 requests a minute, so a longer watchlist pauses during
+a check.
 
 ## Updating
 

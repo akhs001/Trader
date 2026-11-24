@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import emailer, signals
-from .data import DataError, fetch_history
+from .data import DataError, fetch_history, source_of
 from .signals import MIN_BARS, Signal
 from .state import AlertState
 
@@ -26,9 +26,9 @@ class StockResult:
 
 
 def check_stock(symbol: str, config: dict, notify=print) -> StockResult:
-    """Download one stock and look for entry signals. Raises ApiKeyError."""
+    """Download one stock and look for entry signals. Raises SetupError."""
     try:
-        history = fetch_history(symbol, notify=notify)
+        history = fetch_history(symbol, source=source_of(config), notify=notify)
     except DataError as error:
         return StockResult(symbol, error=str(error).removeprefix(f"{symbol}: "))
     result = StockResult(

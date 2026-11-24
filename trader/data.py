@@ -1,8 +1,16 @@
-"""Daily price history from the Twelve Data API (https://twelvedata.com)."""
+"""Daily price history.
+
+Two sources are supported, chosen by `[data] source` in the settings:
+  "yahoo"       Yahoo Finance through the yfinance library. No key, no
+                per-minute limit. Needs `pip install yfinance`.
+  "twelvedata"  The Twelve Data API. Needs a free API key and allows only a
+                few requests per minute.
+"""
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import urllib.error
@@ -21,8 +29,85 @@ class DataError(Exception):
     """Prices for one stock could not be read."""
 
 
-class ApiKeyError(Exception):
-    """The Twelve Data API key is missing or rejected; no stock can be read."""
+class SetupError(Exception):
+    """The price source is not usable at all; no stock can be read."""
+
+
+class ApiKeyError(SetupError):
+    """The Twelve Data API key is missing or rejected."""
+
+
+DEFAULT_SOURCE = "yahoo"
+
+
+def source_of(config: dict) -> str:
+    return str(config.get("data", {}).get("source", DEFAULT_SOURCE)).lower()
+
+
+def check_setup(source: str) -> None:
+    """Raise SetupError if the chosen price source cannot work on this computer."""
+    if source == "twelvedata":
+        api_key()
+    elif source == "yahoo":
+        _yfinance()
+    else:
+        raise SetupError(f'Unknown price source "{source}". Use "yahoo" or "twelvedata".')
+
+
+def fetch_history(symbol: str, source: str = DEFAULT_SOURCE, notify=print) -> History:
+    """Download daily candles. `notify` is told when a rate-limit wait starts."""
+    if source == "twelvedata":
+        return fetch_twelve_data(symbol, notify=notify)
+    check_setup(source)
+    return fetch_yahoo(symbol)
+
+
+# --- Yahoo Finance (yfinance) ------------------------------------------------
+
+def _yfinance():
+    try:
+        import yfinance
+    except ImportError as error:
+        raise SetupError(
+            "The yfinance package is not installed. Start Trader with start.bat, "
+            "or run: py -m pip install yfinance"
+        ) from error
+    return yfinance
+
+
+def fetch_yahoo(symbol: str) -> History:
+    yfinance = _yfinance()
+    # yfinance reports problems through its logger; keep the console clean and
+    # turn an empty result into our own error instead.
+    logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+    try:
+        frame = yfinance.Ticker(symbol).history(period="2y", interval="1d", auto_adjust=True)
+    except Exception as error:  # yfinance raises many different error types
+        raise DataError(f"{symbol}: could not download prices ({error})") from error
+    return history_from_frame(symbol, frame)
+
+
+def history_from_frame(symbol: str, frame) -> History:
+    """Convert a yfinance price table (one row per day) into a History."""
+    history = History(
+        symbol=symbol, name=symbol,
+        dates=[], opens=[], highs=[], lows=[], closes=[], volumes=[],
+    )
+    if frame is not None and len(frame):
+        frame = frame.dropna(subset=["Open", "High", "Low", "Close"])
+        history.dates = [stamp.date().isoformat() for stamp in frame.index]
+        history.opens = [float(v) for v in frame["Open"]]
+        history.highs = [float(v) for v in frame["High"]]
+        history.lows = [float(v) for v in frame["Low"]]
+        history.closes = [float(v) for v in frame["Close"]]
+        history.volumes = [float(v) if v == v else 0.0 for v in frame["Volume"]]
+    if not history.dates:
+        raise DataError(f"{symbol}: no price data (is the ticker right?)")
+    history.session_fraction = market.session_fraction(history.dates[-1])
+    return history
+
+
+# --- Twelve Data --------------------------------------------------------------
 
 
 @dataclass
@@ -50,8 +135,7 @@ def api_key() -> str:
     return key
 
 
-def fetch_history(symbol: str, retries: int = 3, notify=print) -> History:
-    """Download daily candles. `notify` is told when a rate-limit wait starts."""
+def fetch_twelve_data(symbol: str, retries: int = 3, notify=print) -> History:
     query = urllib.parse.urlencode(
         {"symbol": symbol, "interval": "1day", "outputsize": BARS, "order": "asc"}
     )

@@ -12,6 +12,14 @@
 # market hours today's unfinished candle is included, so prices are live
 # (about 15 minutes delayed).
 
+[data]
+# Where prices come from.
+#   "yahoo"       Yahoo Finance, through the yfinance package. No key needed
+#                 and no per-minute limit.
+#   "twelvedata"  Twelve Data. Needs TWELVE_DATA_API_KEY in .env; the free
+#                 plan allows 8 requests a minute.
+source = "yahoo"
+
 [schedule]
 # How often the bot checks the watchlist while the US market is open.
 interval_minutes = 15

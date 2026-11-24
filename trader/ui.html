@@ -190,8 +190,7 @@ function render() {
     el("b", {text: market.open ? "Market open" : "Market closed"}),
     document.createTextNode(" · New York " + market.time));
 
-  if (!setup.data) banners.append(banner("Price data is not set up. Put your Twelve Data key in the ", ".env",
-    " file as TWELVE_DATA_API_KEY, then restart Trader."));
+  if (!setup.data) banners.append(el("div", {class: "banner", text: "Prices cannot be read yet. " + setup.data_problem}));
   if (!setup.email) banners.append(banner("Email is not set up, so entries are only shown here. To get emails, put GMAIL_ADDRESS and GMAIL_APP_PASSWORD in the ", ".env", " file, then restart Trader."));
   if (scan.error) banners.append(el("div", {class: "banner error", text: scan.error}));
 

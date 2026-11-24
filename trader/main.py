@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import emailer, market
-from .data import ApiKeyError, api_key
+from .data import SetupError, check_setup, source_of
 from .scanner import (StockResult, check_watchlist, email_signals, load_config,
                       load_watchlist, new_signals)
 from .state import AlertState
@@ -89,7 +89,7 @@ def scan_once(args: argparse.Namespace) -> int:
 def run_loop(args: argparse.Namespace) -> None:
     """Scan every few minutes during US market hours until stopped."""
     # Fail now, not at the first scan or signal, if the setup is incomplete.
-    api_key()
+    check_setup(source_of(load_config(args.config)))
     emailer.credentials()
     print("Trader bot is running. Leave this window open; press Ctrl+C to stop.")
     waiting = False
@@ -103,7 +103,7 @@ def run_loop(args: argparse.Namespace) -> None:
                 scan_once(args)
             except smtplib.SMTPAuthenticationError:
                 print(f"ERROR: {GMAIL_LOGIN_HELP}")
-            except ApiKeyError as error:
+            except SetupError as error:
                 print(f"ERROR: {error}")
             except Exception as error:  # keep running through e.g. a network outage
                 print(f"Scan failed, will retry: {error}")
@@ -147,7 +147,7 @@ if __name__ == "__main__":
         sys.exit(main())
     except KeyboardInterrupt:
         print("\nStopped.")
-    except (emailer.EmailConfigError, ApiKeyError) as error:
+    except (emailer.EmailConfigError, SetupError) as error:
         print(f"ERROR: {error}")
         sys.exit(2)
     except smtplib.SMTPAuthenticationError:
