@@ -583,6 +583,28 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(started), 4)
         self.assertEqual([round(b - a) for a, b in zip(started, started[1:])], [60, 60, 60])
 
+    def test_page_is_told_when_the_program_was_updated(self):
+        from unittest import mock
+        from trader import app as app_module
+        self.assertIs(self.call("/api/state")[1]["stale"], False)
+        with mock.patch.object(app_module, "code_fingerprint", lambda: "different files on disk"):
+            self.assertIs(self.call("/api/state")[1]["stale"], True)
+
+    def test_a_new_copy_can_take_over_the_port(self):
+        import socket
+        from trader import app as app_module
+        port = self.server.server_address[1]
+        self.assertTrue(app_module.stop_running_copy(self.base))
+        for _ in range(200):
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            except OSError:
+                break  # the old copy has stopped listening
+        else:
+            self.fail("the running copy did not stop")
+        # Nothing answering there any more: asking again reports failure.
+        self.assertFalse(app_module.stop_running_copy(self.base))
+
     def test_other_sites_cannot_use_the_app(self):
         request = self.urllib.Request(self.base + "/api/check", data=b"{}")  # no X-Trader header
         opener = self.urllib.build_opener(self.urllib.ProxyHandler({}))

@@ -8,11 +8,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import smtplib
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +31,20 @@ from .state import AlertState
 UI_FILE = Path(__file__).with_name("ui.html")
 MIN_INTERVAL, MAX_INTERVAL = 1, 15  # minutes between automatic checks
 SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9.\-:/]{0,14}$")
+
+
+def code_fingerprint() -> str:
+    """Identifies the program files on disk, to notice an update."""
+    digest = hashlib.sha256()
+    for path in sorted(Path(__file__).parent.glob("*.py")):
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            pass  # a file being replaced right now
+    return digest.hexdigest()
+
+
+RUNNING_CODE = code_fingerprint()  # the version this process loaded
 
 
 class App:
@@ -59,6 +76,9 @@ class App:
                      "min": MIN_INTERVAL, "max": MAX_INTERVAL},
             "market": {"open": market.is_scan_time(), "time": now.strftime("%a %H:%M")},
             "setup": self._setup(),
+            # True once update.bat has replaced the program files: the page is
+            # then newer than this running program, which must be restarted.
+            "stale": code_fingerprint() != RUNNING_CODE,
         }
 
     def _setup(self) -> dict:
@@ -265,6 +285,10 @@ def make_handler(app: App):
                 self._json({"error": ""})
             elif self.path == "/api/test-email":
                 self._json({"message": app.send_test_email()})
+            elif self.path == "/api/quit":
+                # Sent by a newer copy that is starting up and needs the port.
+                self._json({"error": ""})
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
             else:
                 self._json({"error": "Not found"}, 404)
 
@@ -299,6 +323,20 @@ def serve(app: App, port: int) -> ThreadingHTTPServer:
     return server
 
 
+def stop_running_copy(url: str) -> bool:
+    """Ask the Trader already running at `url` to stop. False if it cannot."""
+    request = urllib.request.Request(
+        url + "/api/quit", data=b"{}",
+        headers={"Content-Type": "application/json", "X-Trader": "1"},
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=5) as response:
+            return "error" in json.loads(response.read())
+    except (urllib.error.URLError, OSError, ValueError):
+        return False  # not Trader, or a version from before it could be asked
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--port", type=int, default=8765)
@@ -311,10 +349,21 @@ def main(argv: list[str] | None = None) -> int:
     try:
         server = serve(app, args.port)
     except OSError:
-        print(f"Trader seems to be running already. Opening {url}")
-        if not args.no_browser:
-            webbrowser.open(url)
-        return 0
+        # Something already uses the port, normally a copy of Trader started
+        # earlier (perhaps before an update). Take over from it.
+        server = None
+        if stop_running_copy(url):
+            for _ in range(50):
+                try:
+                    server = serve(app, args.port)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+        if server is None:
+            print("An older copy of Trader is still running and has to be closed first.")
+            print("Close the other Trader window, then start Trader again.")
+            return 1
+        print("Replaced the copy of Trader that was already running.")
 
     print(f"Trader is running at {url}")
     print("Keep this window open while you use it. Close it (or press Ctrl+C) to stop.")
@@ -324,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopped.")
+    server.server_close()
     return 0
 
 

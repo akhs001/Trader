@@ -199,6 +199,9 @@ function render() {
     el("b", {text: market.open ? "Market open" : "Market closed"}),
     document.createTextNode(" · New York " + market.time));
 
+  // `stale` is missing when the running program predates this page.
+  if (state.stale !== false) banners.append(el("div", {class: "banner error",
+    text: "Trader was updated, but the old version is still running. Close the black Trader window, then double-click start.bat again."}));
   if (!setup.data) banners.append(el("div", {class: "banner", text: "Prices cannot be read yet. " + setup.data_problem}));
   if (!setup.email) banners.append(banner("Email is not set up, so entries are only shown here. To get emails, put GMAIL_ADDRESS and GMAIL_APP_PASSWORD in the ", ".env", " file, then restart Trader."));
   if (scan.error) banners.append(el("div", {class: "banner error", text: scan.error}));
@@ -213,7 +216,7 @@ function render() {
   $("auto").disabled = !setup.data;
   const select = $("interval");
   if (!select.options.length) {
-    for (let minutes = auto.min; minutes <= auto.max; minutes++) {
+    for (let minutes = auto.min || 1; minutes <= (auto.max || 15); minutes++) {
       select.append(el("option", {value: minutes, text: minutes + " min"}));
     }
   }
