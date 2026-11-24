@@ -183,6 +183,61 @@ class SignalTests(unittest.TestCase):
         self.assertIn("RSI(14)", signal.facts)
 
 
+class PlanTests(unittest.TestCase):
+    def breakout(self, plan_settings=None, last_close=103.0):
+        closes = [100.0] * 259 + [last_close]
+        history = make_history(closes, volumes=[1_000_000.0] * 259 + [2_000_000.0])
+        config = {**CONFIG, "plan": plan_settings or {}}
+        signal = next(s for s in scan(history, config) if s.kind == "breakout")
+        atr = indicators.atr(history.highs, history.lows, history.closes)[-1]
+        return signal.plan, atr
+
+    def test_stop_sits_below_the_setup_level(self):
+        plan, atr = self.breakout()
+        self.assertEqual(plan.entry, 103.0)
+        # The breakout level is the prior high of 100.50; the stop is a quarter ATR below it.
+        self.assertAlmostEqual(plan.stop, 100.5 - 0.25 * atr)
+        self.assertIn("breakout level (100.50)", plan.stop_basis)
+        self.assertAlmostEqual(plan.targets[0], plan.entry + 2 * plan.risk)
+        self.assertAlmostEqual(plan.targets[1], plan.entry + 3 * plan.risk)
+        self.assertLess(plan.stop, plan.entry)
+
+    def test_stop_is_not_tighter_than_the_minimum(self):
+        plan, atr = self.breakout(last_close=100.6)
+        self.assertAlmostEqual(plan.risk, 1.0 * atr)
+        self.assertIn("too close", plan.stop_basis)
+
+    def test_stop_is_not_wider_than_the_maximum(self):
+        plan, atr = self.breakout({"max_stop_atr": 1.5})
+        self.assertAlmostEqual(plan.risk, 1.5 * atr)
+        self.assertIn("too far", plan.stop_basis)
+
+    def test_custom_targets(self):
+        plan, _ = self.breakout({"targets_r": [1.5]})
+        self.assertEqual(len(plan.targets), 1)
+        self.assertAlmostEqual(plan.targets[0], plan.entry + 1.5 * plan.risk)
+
+    def test_cross_signals_use_a_volatility_stop(self):
+        closes = [200 - i * 0.5 for i in range(200)]
+        signal = None
+        while signal is None:
+            closes.append(closes[-1] + 1.5)
+            history = make_history(closes)
+            signal = next((s for s in scan(history, CONFIG) if s.kind == "ma_cross"), None)
+        atr = indicators.atr(history.highs, history.lows, history.closes)[-1]
+        self.assertAlmostEqual(signal.plan.risk, 2.0 * atr)
+        self.assertEqual(signal.plan.stop_basis, "2 ATR below entry")
+
+    def test_pullback_and_bounce_stops_use_recent_lows(self):
+        closes = [100 + i * 0.5 for i in range(250)]
+        peak = closes[-1]
+        closes += [peak - 3, peak - 6, peak - 8, peak - 9, peak - 6]
+        history = make_history(closes, highs=[c + 0.5 for c in closes], lows=[c - 0.5 for c in closes])
+        signal = next(s for s in scan(history, CONFIG) if s.kind == "trend_pullback")
+        self.assertIn(f"pullback low ({peak - 9.5:.2f})", signal.plan.stop_basis)
+        self.assertLess(signal.plan.stop, peak - 9.5)
+
+
 class DataTests(unittest.TestCase):
     def payload(self, **meta):
         return {"chart": {"error": None, "result": [{
@@ -266,6 +321,8 @@ class StateAndEmailTests(unittest.TestCase):
             self.assertIn("Breakout", body)
             self.assertIn("103.00", body)
             self.assertIn("not financial advice", body)
+            for label in ("Entry", "SL", "TP1", "TP2", "108.59", "breakout level"):
+                self.assertIn(label, body)
 
     def test_watchlist_parsing(self):
         with tempfile.TemporaryDirectory() as tmp:

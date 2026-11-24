@@ -17,8 +17,26 @@ unfinished candle is included, so the bot reacts to the current price.
 | Moving-average cross | The 20-day average crosses above the 50-day average. |
 | MACD cross | MACD (12, 26, 9) crosses above its signal line. |
 
-Thresholds and the check interval live in `config.toml`, where each signal can
-also be switched off. After a signal is emailed for a stock, the same signal
+## Trade plan
+
+Every alert comes with Entry, SL, TP1 and TP2:
+
+- **Entry** is the price at the moment of the scan.
+- **SL** sits just below the price that would prove the setup wrong: the
+  pullback low, the breakout level, or the recent low. It is kept between 1
+  and 3 ATR from the entry (ATR is the stock's average daily range), so it is
+  neither inside everyday noise nor unreasonably far. Average and MACD crosses
+  have no such price, so their SL is 2 ATR below the entry.
+- **TP1 and TP2** are 2 and 3 times the risk (entry minus SL) above the entry.
+
+When a stock fires several signals at once, the plan follows the first one
+listed. The levels come from fixed rules, not from a forecast, and have not
+been backtested.
+
+## Settings
+
+Thresholds, the trade-plan rules and the check interval live in `config.toml`,
+where each signal can also be switched off. After a signal is emailed for a stock, the same signal
 stays quiet for `cooldown_days` (default 5).
 
 ## Setup

@@ -15,6 +15,20 @@ MIN_BARS = 60  # below this there is too little history for anything useful
 
 
 @dataclass
+class Plan:
+    """A mechanical trade plan: where to get in, where to get out."""
+
+    entry: float
+    stop: float
+    targets: list[float]
+    stop_basis: str  # why the stop is where it is
+
+    @property
+    def risk(self) -> float:
+        return self.entry - self.stop
+
+
+@dataclass
 class Signal:
     symbol: str
     name: str
@@ -24,6 +38,7 @@ class Signal:
     date: str
     price: float
     change_pct: float
+    plan: Plan | None = None
     facts: dict[str, str] = field(default_factory=dict)
 
 
@@ -33,7 +48,7 @@ def scan(history: History, config: dict) -> list[Signal]:
         return []
     ctx = _Context(history)
     cfg = config.get("signals", {})
-    found: list[tuple[str, str, str]] = []
+    found: list[_Found] = []
 
     for name, detector in (
         ("trend_pullback", _trend_pullback),
@@ -55,10 +70,52 @@ def scan(history: History, config: dict) -> list[Signal]:
             date=history.dates[-1],
             price=ctx.close[-1],
             change_pct=(ctx.close[-1] / ctx.close[-2] - 1) * 100,
+            plan=_plan(ctx, stop_level, stop_name, config.get("plan", {})),
             facts=ctx.facts(),
         )
-        for kind, title, reason in found
+        for kind, title, reason, stop_level, stop_name in found
     ]
+
+
+# (kind, title, reason, stop_level, stop_name). The stop level is the price
+# that would prove the setup wrong (e.g. the pullback low); None when the
+# signal has no such price and the stop is set by volatility alone.
+_Found = tuple[str, str, str, float | None, str]
+
+STOP_BUFFER_ATR = 0.25  # room left below the stop level, in ATRs
+
+
+def _plan(ctx: "_Context", stop_level: float | None, stop_name: str, settings: dict) -> Plan | None:
+    """Entry at the current price, stop from the setup, targets as multiples of the risk."""
+    atr = ctx.atr[-1]
+    if not atr:
+        return None
+    entry = ctx.close[-1]
+    min_atr = float(settings.get("min_stop_atr", 1.0))
+    max_atr = max(float(settings.get("max_stop_atr", 3.0)), min_atr)
+    default_atr = min(max(float(settings.get("default_stop_atr", 2.0)), min_atr), max_atr)
+
+    if stop_level is None:
+        distance = default_atr * atr
+        basis = f"{default_atr:g} ATR below entry"
+    else:
+        distance = entry - (stop_level - STOP_BUFFER_ATR * atr)
+        basis = f"just below {stop_name} ({stop_level:.2f})"
+        # Keep the stop out of everyday noise, and the risk from getting too large.
+        if distance < min_atr * atr:
+            distance = min_atr * atr
+            basis = f"{min_atr:g} ATR below entry ({stop_name} at {stop_level:.2f} is too close)"
+        elif distance > max_atr * atr:
+            distance = max_atr * atr
+            basis = f"{max_atr:g} ATR below entry ({stop_name} at {stop_level:.2f} is too far)"
+
+    multiples = settings.get("targets_r", [2.0, 3.0])
+    return Plan(
+        entry=entry,
+        stop=entry - distance,
+        targets=[entry + float(r) * distance for r in multiples],
+        stop_basis=basis,
+    )
 
 
 class _Context:
@@ -100,13 +157,12 @@ class _Context:
         if ratio is not None:
             estimate = " (projected)" if self.h.session_fraction < 1 else ""
             facts["Volume"] = f"{ratio:.1f}x average{estimate}"
-        facts["10-day low"] = f"{min(self.low[-10:]):.2f}"
         if self.atr[-1] is not None:
             facts["ATR(14)"] = f"{self.atr[-1]:.2f}"
         return facts
 
 
-def _trend_pullback(ctx: _Context, settings: dict) -> list[tuple[str, str, str]]:
+def _trend_pullback(ctx: _Context, settings: dict) -> list[_Found]:
     lookback = int(settings.get("lookback_days", 5))
     touch = 1 + float(settings.get("touch_pct", 1.0)) / 100
     rsi_below = float(settings.get("rsi_below", 40))
@@ -133,10 +189,12 @@ def _trend_pullback(ctx: _Context, settings: dict) -> list[tuple[str, str, str]]
         "Trend pullback",
         f"Uptrend (above the 200-day average) pulled back to {pulled_back_to} "
         f"and is now trading above yesterday's high of {ctx.high[-2]:.2f}.",
+        min(ctx.low[-1 - lookback :]),
+        "the pullback low",
     )]
 
 
-def _breakout(ctx: _Context, settings: dict) -> list[tuple[str, str, str]]:
+def _breakout(ctx: _Context, settings: dict) -> list[_Found]:
     lookback = int(settings.get("lookback_days", 20))
     min_ratio = float(settings.get("volume_ratio", 1.5))
     if len(ctx.close) < lookback + 2:
@@ -157,10 +215,12 @@ def _breakout(ctx: _Context, settings: dict) -> list[tuple[str, str, str]]:
         "Breakout",
         f"Price moved above its {lookback}-day high of {level:.2f} "
         f"on {ratio:.1f}x average volume.",
+        level,
+        "the breakout level",
     )]
 
 
-def _oversold_bounce(ctx: _Context, settings: dict) -> list[tuple[str, str, str]]:
+def _oversold_bounce(ctx: _Context, settings: dict) -> list[_Found]:
     level = float(settings.get("rsi_level", 30))
     today, yesterday = ctx.rsi[-1], ctx.rsi[-2]
     if today is None or yesterday is None or not (yesterday < level <= today):
@@ -170,10 +230,12 @@ def _oversold_bounce(ctx: _Context, settings: dict) -> list[tuple[str, str, str]
         "Oversold bounce",
         f"RSI(14) crossed back above {level:.0f} "
         f"(yesterday {yesterday:.0f}, now {today:.0f}).",
+        min(ctx.low[-5:]),
+        "the recent low",
     )]
 
 
-def _ma_cross(ctx: _Context, settings: dict) -> list[tuple[str, str, str]]:
+def _ma_cross(ctx: _Context, settings: dict) -> list[_Found]:
     fast_n, slow_n = int(settings.get("fast", 20)), int(settings.get("slow", 50))
     found = []
 
@@ -185,6 +247,8 @@ def _ma_cross(ctx: _Context, settings: dict) -> list[tuple[str, str, str]]:
             "Moving-average cross",
             f"The {fast_n}-day average ({fast[-1]:.2f}) crossed above "
             f"the {slow_n}-day average ({slow[-1]:.2f}).",
+            None,
+            "",
         ))
 
     if settings.get("macd", True):
@@ -195,6 +259,8 @@ def _ma_cross(ctx: _Context, settings: dict) -> list[tuple[str, str, str]]:
                 "macd_cross",
                 "MACD cross",
                 f"MACD crossed above its signal line ({side} the zero line).",
+                None,
+                "",
             ))
     return found
 

@@ -11,6 +11,20 @@ interval_minutes = 15
 # for this many calendar days.
 cooldown_days = 5
 
+[plan]
+# Every alert comes with a trade plan: Entry, SL and TP.
+# Entry = the price at scan time.
+# SL = just below the level that would prove the setup wrong (the pullback
+# low, the breakout level, the recent low), kept between `min_stop_atr` and
+# `max_stop_atr` ATRs from the entry. ATR is the stock's average daily range.
+# Signals without such a level (average and MACD crosses) use `default_stop_atr`.
+min_stop_atr = 1.0
+max_stop_atr = 3.0
+default_stop_atr = 2.0
+# TP levels, as multiples of the risk (entry minus SL). [2.0, 3.0] means TP1
+# is twice as far from the entry as the SL, and TP2 three times as far.
+targets_r = [2.0, 3.0]
+
 [signals.trend_pullback]
 enabled = true
 # Uptrend = price above the 200-day average and 50-day above 200-day.

@@ -13,8 +13,9 @@ SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 
 DISCLAIMER = (
-    "Automated technical alert based on delayed price data. "
-    "It is not financial advice; check the chart before trading."
+    "Automated technical alert. Entry, SL and TP are calculated by fixed rules "
+    "from the price at scan time; they are not predictions and not financial "
+    "advice. Check the chart before trading."
 )
 
 
@@ -72,16 +73,46 @@ def _by_stock(signals: list[Signal]) -> list[list[Signal]]:
     return list(groups.values())
 
 
+def _plan_rows(signal: Signal) -> list[tuple[str, str, str]]:
+    """(label, price, distance from entry) for each level of the trade plan."""
+    plan = signal.plan
+    if plan is None:
+        return []
+    def pct(level: float) -> str:
+        return f"{(level / plan.entry - 1) * 100:+.1f}%"
+    rows = [("Entry", f"{plan.entry:.2f}", ""), ("SL", f"{plan.stop:.2f}", pct(plan.stop))]
+    for i, target in enumerate(plan.targets, start=1):
+        label = "TP" if len(plan.targets) == 1 else f"TP{i}"
+        rows.append((label, f"{target:.2f}", pct(target)))
+    return rows
+
+
+def _plan_note(signal: Signal, several_signals: bool) -> str:
+    plan = signal.plan
+    ratios = " and ".join(f"{(t - plan.entry) / plan.risk:g}x" for t in plan.targets)
+    note = f"SL is {plan.stop_basis}. TP is {ratios} the risk of {plan.risk:.2f} per share."
+    if several_signals:
+        note += f" Plan based on the {signal.title.lower()} signal."
+    return note
+
+
 def _plain_text(signals: list[Signal]) -> str:
     blocks = []
     for group in _by_stock(signals):
         s = group[0]
         reasons = "\n".join(f"  * {g.title}: {g.reason}" for g in group)
         facts = "\n".join(f"  {label}: {value}" for label, value in s.facts.items())
+        plan = ""
+        if s.plan:
+            levels = "   ".join(
+                f"{label}: {price}" + (f" ({pct})" if pct else "")
+                for label, price, pct in _plan_rows(s)
+            )
+            plan = f"  {levels}\n  {_plan_note(s, len(group) > 1)}\n"
         blocks.append(
             f"{s.symbol} ({s.name})\n"
             f"  Price: {s.price:.2f} ({s.change_pct:+.2f}% today, {s.date})\n"
-            f"{reasons}\n{facts}\n"
+            f"{plan}{reasons}\n{facts}\n"
             f"  Chart: {_chart_url(s.symbol)}"
         )
     return "\n\n".join(blocks) + f"\n\n{DISCLAIMER}\n"
@@ -104,6 +135,22 @@ def _html(signals: list[Signal]) -> str:
             f'{escape(label)}<br><span style="color:#202124;font-weight:600">{escape(value)}</span></span>'
             for label, value in s.facts.items()
         )
+        plan = ""
+        if s.plan:
+            colors = {"Entry": "#202124", "SL": "#c5221f"}
+            cells = "".join(
+                f'<td style="padding:8px 6px;text-align:center;border-right:1px solid #ffffff">'
+                f'<div style="font-size:11px;font-weight:700;letter-spacing:.04em;color:#5f6368">{label}</div>'
+                f'<div style="font-size:16px;font-weight:700;color:{colors.get(label, "#137333")}">{price}</div>'
+                f'<div style="font-size:11px;color:#5f6368">{pct or "&nbsp;"}</div></td>'
+                for label, price, pct in _plan_rows(s)
+            )
+            plan = (
+                f'<table cellpadding="0" cellspacing="0" width="100%" style="border-collapse:collapse;'
+                f'background:#f1f3f4;border-radius:6px;margin:12px 0 0"><tr>{cells}</tr></table>'
+                f'<div style="font-size:12px;line-height:1.5;color:#5f6368;margin:6px 0 0">'
+                f'{escape(_plan_note(s, len(group) > 1))}</div>'
+            )
         cards.append(f"""
 <div style="border:1px solid #dadce0;border-radius:8px;padding:16px;margin:0 0 14px">
   <div style="font-size:20px;font-weight:700;color:#202124">{escape(s.symbol)}
@@ -111,6 +158,7 @@ def _html(signals: list[Signal]) -> str:
   <div style="font-size:16px;color:#202124;margin:2px 0 0">{s.price:.2f}
     <span style="color:{color}">{s.change_pct:+.2f}%</span>
     <span style="font-size:12px;color:#5f6368">&nbsp;{escape(s.date)}</span></div>
+  {plan}
   {reasons}
   <div style="margin:4px 0 0">{facts}</div>
   <p style="margin:14px 0 0"><a href="{_chart_url(s.symbol)}" style="font-size:13px;color:#1a73e8">Open chart</a></p>
