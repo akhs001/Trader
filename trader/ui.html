@@ -46,6 +46,9 @@
   button.link { border: 0; background: none; padding: 0; color: var(--accent); }
   .options { display: grid; gap: 6px; font-size: 14px; }
   .options label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .auto-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+  select { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line);
+           border-radius: 6px; padding: 2px 6px; }
   .status { margin-top: 12px; font-size: 14px; color: var(--muted); min-height: 21px; }
   .bar { height: 4px; border-radius: 2px; background: var(--soft); margin-top: 10px; overflow: hidden; display: none; }
   .bar span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
@@ -106,7 +109,11 @@
       <button class="primary" id="check">Check entries</button>
       <div class="options">
         <label><input type="checkbox" id="email"> <span id="email-label">Email me new entries</span></label>
-        <label><input type="checkbox" id="auto"> <span id="auto-label">Check automatically while the market is open</span></label>
+        <div class="auto-row">
+          <label><input type="checkbox" id="auto"> Check automatically every</label>
+          <select id="interval" aria-label="Minutes between automatic checks"></select>
+          <label for="auto">while the market is open</label>
+        </div>
       </div>
     </div>
     <div class="bar" id="bar"><span></span></div>
@@ -167,7 +174,9 @@ async function refresh() {
     offline = true;
   }
   render();
-  timer = setTimeout(refresh, state && state.scan.running ? 700 : 10000);
+  // Poll quickly during a check, and often enough to show automatic checks.
+  const pause = !state ? 10000 : state.scan.running ? 700 : state.auto.enabled ? 3000 : 10000;
+  timer = setTimeout(refresh, pause);
 }
 
 function money(value) { return value == null ? "" : value.toFixed(2); }
@@ -202,7 +211,14 @@ function render() {
   $("email-label").textContent = setup.email ? "Email me new entries (" + setup.email_to + ")" : "Email me new entries";
   $("auto").checked = auto.enabled;
   $("auto").disabled = !setup.data;
-  $("auto-label").textContent = "Check automatically every " + auto.interval + " min while the market is open";
+  const select = $("interval");
+  if (!select.options.length) {
+    for (let minutes = auto.min; minutes <= auto.max; minutes++) {
+      select.append(el("option", {value: minutes, text: minutes + " min"}));
+    }
+  }
+  if (document.activeElement !== select) select.value = auto.interval;
+  select.disabled = !setup.data;
   $("test-email-wrap").style.display = setup.email ? "" : "none";
 
   const done = scan.results.length;
@@ -214,6 +230,7 @@ function render() {
     status = scan.message || ("Checking " + (scan.current || "…") + " (" + Math.min(done + 1, scan.total) + " of " + scan.total + ")");
   } else if (scan.finished) {
     status = "Checked at " + scan.finished + ": " + (hits.length ? plural(hits.length, "stock") + " with a possible entry" : "no entries right now") + ". " + (scan.email || "");
+    if (auto.enabled && !market.open) status += " Automatic checks resume when the market opens.";
   } else if (watchlist.length === 0) {
     status = "Add a ticker to your watchlist to get started.";
   } else {
@@ -321,7 +338,12 @@ $("check").addEventListener("click", async () => {
   refresh();
 });
 $("auto").addEventListener("change", async () => {
-  await post("/api/auto", {enabled: $("auto").checked});
+  await post("/api/auto", {enabled: $("auto").checked, interval: Number($("interval").value)});
+  refresh();
+});
+$("interval").addEventListener("change", async () => {
+  $("interval").blur();
+  await post("/api/auto", {enabled: $("auto").checked, interval: Number($("interval").value)});
   refresh();
 });
 $("add-form").addEventListener("submit", async (event) => {

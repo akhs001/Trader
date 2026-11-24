@@ -26,6 +26,7 @@ from .scanner import (StockResult, check_watchlist, email_signals, load_config,
 from .state import AlertState
 
 UI_FILE = Path(__file__).with_name("ui.html")
+MIN_INTERVAL, MAX_INTERVAL = 1, 15  # minutes between automatic checks
 SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9.\-:/]{0,14}$")
 
 
@@ -40,7 +41,9 @@ class App:
         self.lock = threading.Lock()
         self.scan = {"running": False, "results": [], "total": 0, "current": "",
                      "message": "", "finished": "", "error": "", "email": ""}
-        self.auto = bool(self._load_settings().get("auto"))
+        settings = self._load_settings()
+        self.auto = bool(settings.get("auto"))
+        self.interval = settings.get("interval")  # minutes; None = the default from the settings file
         self.last_auto = 0.0
 
     # --- what the page shows -------------------------------------------------
@@ -52,7 +55,8 @@ class App:
         return {
             "watchlist": load_watchlist(self.watchlist_path),
             "scan": scan,
-            "auto": {"enabled": self.auto, "interval": self._interval()},
+            "auto": {"enabled": self.auto, "interval": self._interval(),
+                     "min": MIN_INTERVAL, "max": MAX_INTERVAL},
             "market": {"open": market.is_scan_time(), "time": now.strftime("%a %H:%M")},
             "setup": self._setup(),
         }
@@ -74,7 +78,12 @@ class App:
         return load_config(self.config_path)
 
     def _interval(self) -> int:
-        return max(int(self._config().get("schedule", {}).get("interval_minutes", 15)), 1)
+        """Minutes between automatic checks, between 1 and 15."""
+        try:
+            minutes = int(self.interval or self._config().get("schedule", {}).get("interval_minutes", 15))
+        except (TypeError, ValueError):
+            minutes = 15
+        return min(max(minutes, MIN_INTERVAL), MAX_INTERVAL)
 
     # --- checking ------------------------------------------------------------
 
@@ -116,7 +125,7 @@ class App:
         except Exception as problem:  # show the problem on the page instead of dying silently
             error = f"The check failed: {problem}"
         self._update(running=False, current="", message="", error=error, email=email,
-                     finished=datetime.now().strftime("%H:%M"))
+                     finished=datetime.now().strftime("%H:%M:%S"))
 
     def _update(self, **changes) -> None:
         with self.lock:
@@ -129,15 +138,19 @@ class App:
 
     # --- automatic checking --------------------------------------------------
 
-    def set_auto(self, enabled: bool) -> None:
+    def set_auto(self, enabled: bool, interval=None) -> None:
         self.auto = enabled
+        try:
+            self.interval = min(max(int(interval), MIN_INTERVAL), MAX_INTERVAL)
+        except (TypeError, ValueError):
+            pass  # no usable number sent: keep the current interval
         self.settings_path.parent.mkdir(parents=True, exist_ok=True)
-        self.settings_path.write_text(json.dumps({"auto": enabled}))
+        self.settings_path.write_text(json.dumps({"auto": enabled, "interval": self.interval}))
 
     def run_auto(self) -> None:
         """Background loop: while switched on, check on a timer during market hours."""
         while True:
-            time.sleep(20)
+            time.sleep(5)
             try:
                 interval = self._interval()
                 due = time.monotonic() - self.last_auto >= interval * 60
@@ -248,7 +261,7 @@ def make_handler(app: App):
                 app.remove_symbol(body.get("symbol", ""))
                 self._json({"error": ""})
             elif self.path == "/api/auto":
-                app.set_auto(bool(body.get("enabled")))
+                app.set_auto(bool(body.get("enabled")), body.get("interval"))
                 self._json({"error": ""})
             elif self.path == "/api/test-email":
                 self._json({"message": app.send_test_email()})

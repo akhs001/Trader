@@ -539,10 +539,49 @@ class AppTests(unittest.TestCase):
 
     def test_auto_setting_is_remembered(self):
         from trader import app as app_module
-        self.call("/api/auto", {"enabled": True})
-        self.assertTrue(self.call("/api/state")[1]["auto"]["enabled"])
+        self.assertEqual(self.call("/api/state")[1]["auto"]["interval"], 15)  # from config.toml
+        self.call("/api/auto", {"enabled": True, "interval": 2})
+        auto = self.call("/api/state")[1]["auto"]
+        self.assertEqual((auto["enabled"], auto["interval"]), (True, 2))
         reopened = app_module.App(self.app.watchlist_path, self.app.config_path, self.app.state_path.parent)
         self.assertTrue(reopened.auto)
+        self.assertEqual(reopened._interval(), 2)
+        # Out-of-range or nonsense values are brought back into 1-15 minutes.
+        for sent, kept in ((0, 1), (99, 15), ("abc", 15), (None, 15), (1, 1)):
+            self.call("/api/auto", {"enabled": True, "interval": sent})
+            self.assertEqual(self.call("/api/state")[1]["auto"]["interval"], kept, sent)
+
+    def test_automatic_check_runs_on_the_chosen_interval(self):
+        from unittest import mock
+        from trader import app as app_module
+        self.app.set_auto(True, 1)
+        clock = {"now": 1000.0}
+        ticks = {"n": 0}
+
+        import threading
+        test_thread = threading.current_thread()
+
+        def fake_sleep(seconds):
+            if threading.current_thread() is not test_thread:
+                return  # a pause inside the background check itself
+            ticks["n"] += 1
+            clock["now"] += seconds
+            if ticks["n"] > 40:  # 200 simulated seconds
+                raise SystemExit
+            while self.app.scan["running"]:
+                pass  # let the background check finish (time.sleep is faked here)
+
+        started = []
+        real_start = self.app.start_check
+        self.app.start_check = lambda send_email: started.append(clock["now"]) or real_start(send_email)
+        with mock.patch.object(app_module.time, "sleep", fake_sleep), \
+             mock.patch.object(app_module.time, "monotonic", lambda: clock["now"]), \
+             mock.patch.object(app_module.market, "is_scan_time", lambda grace_minutes=0: True):
+            with self.assertRaises(SystemExit):
+                self.app.run_auto()
+        # One check at once, then one per minute: 4 in 200 seconds.
+        self.assertEqual(len(started), 4)
+        self.assertEqual([round(b - a) for a, b in zip(started, started[1:])], [60, 60, 60])
 
     def test_other_sites_cannot_use_the_app(self):
         request = self.urllib.Request(self.base + "/api/check", data=b"{}")  # no X-Trader header

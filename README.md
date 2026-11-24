@@ -80,9 +80,10 @@ closing it stops Trader.
 - **Email me new entries** also emails the entries that have not been emailed
   in the last `cooldown_days`. Without Gmail details in `.env`, entries are
   only shown on the page.
-- **Check automatically** repeats the check every `interval_minutes` on
-  weekdays from 9:30 to 16:00 New York time and emails new entries. It is off
-  until you tick it, and your computer has to be on and awake.
+- **Check automatically every N min** repeats the check on weekdays from 9:30
+  to 16:00 New York time and emails new entries. Pick any interval from 1 to
+  15 minutes; your choice is remembered. It is off until you tick it, and your
+  computer has to be on and awake.
 - Add and remove tickers under **Watchlist**, or edit `watchlist.txt`.
 
 The page only answers on your own computer; it is not reachable from the
@@ -90,9 +91,11 @@ network.
 
 ### Price source
 
-Yahoo Finance needs no key and has no per-minute limit, but yfinance is an
-unofficial library: if prices stop loading one day, update it with
-`py -m pip install -U yfinance`. As a fallback, Trader can read prices from
+Yahoo Finance needs no key and has no fixed per-minute limit, but yfinance is
+an unofficial library and Yahoo can temporarily refuse a computer that asks
+too much. A watchlist of a few dozen stocks every minute has been fine; if
+checks start failing, choose a longer interval. If prices stop loading
+altogether, update the library with `py -m pip install -U yfinance`. As a fallback, Trader can read prices from
 [Twelve Data](https://twelvedata.com) instead: put `TWELVE_DATA_API_KEY` in
 `.env` and this in `config.local.toml`:
 
