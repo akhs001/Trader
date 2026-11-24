@@ -18,6 +18,15 @@ from . import indicators
 from .data import History
 
 MIN_BARS = 60  # below this there is too little history for anything useful
+
+# The strategies a user can pick. Each has a long and a short form.
+STRATEGIES = {
+    "trend_pullback": "Trend pullback",
+    "breakout": "Breakout",
+    "rsi_reversal": "RSI reversal",
+    "ma_cross": "Moving-average cross",
+    "macd_cross": "MACD cross",
+}
 STOP_BUFFER_ATR = 0.25  # room left beyond the stop level, in ATRs
 
 
@@ -43,6 +52,7 @@ class Signal:
     kind: str  # stable id, used for de-duplication
     title: str
     reason: str
+    strategy: str  # key of STRATEGIES
     date: str
     price: float
     change_pct: float
@@ -53,6 +63,7 @@ class Signal:
 
 @dataclass
 class _Found:
+    strategy: str
     kind: str
     title: str
     reason: str
@@ -64,59 +75,82 @@ class _Found:
 
 def scan(history: History, config: dict) -> list[Signal]:
     """Return every enabled entry signal that is firing on the latest candle."""
-    if len(history.closes) < MIN_BARS:
-        return []
-    cfg = config.get("signals", {})
-    readings = _View(history).facts()
-    change_pct = (history.closes[-1] / history.closes[-2] - 1) * 100
-    signals = []
-
-    for direction in ("long", "short"):
-        if not cfg.get(direction, True):
-            continue
-        view = _View(history, short=direction == "short")
-        for name, detector in (
-            ("trend_pullback", _trend_pullback),
-            ("breakout", _breakout),
-            ("oversold_bounce", _oversold_bounce),
-            ("ma_cross", _ma_cross),
-        ):
-            settings = cfg.get(name, {})
-            if not settings.get("enabled", True):
-                continue
-            for found in detector(view, settings):
-                signals.append(Signal(
-                    symbol=history.symbol,
-                    name=history.name,
-                    kind=found.kind,
-                    title=found.title,
-                    reason=found.reason,
-                    date=history.dates[-1],
-                    price=history.closes[-1],
-                    change_pct=change_pct,
-                    direction=direction,
-                    plan=_plan(view, found, config.get("plan", {})),
-                    facts=readings,
-                ))
-    return signals
+    return Analysis(history).scan(config)
 
 
 def facts(history: History) -> dict[str, str]:
     """Indicator readings for a stock, whether or not a signal is firing."""
     if len(history.closes) < 2:
         return {}
-    return _View(history).facts()
+    return Analysis(history).long.view().facts()
 
 
-class _View:
-    """Prices and indicators as a detector sees them.
+class Analysis:
+    """A stock's history prepared for scanning, as of today or any earlier day.
 
-    With short=True everything is mirrored: closes are negated and highs and
-    lows swap, so a falling market looks like a rising one. `price()` turns a
-    value from the view back into a real price.
+    Indicators are computed once for the whole history. Because each value
+    depends only on earlier candles, looking at the first `end` candles gives
+    exactly what a live scan saw on that day, which is what a backtest needs.
     """
 
-    def __init__(self, history: History, short: bool = False):
+    def __init__(self, history: History):
+        self.history = history
+        self.long = _Market(history, short=False)
+        self.short = _Market(history, short=True)
+
+    def scan(self, config: dict, end: int | None = None) -> list[Signal]:
+        """Signals firing on candle `end - 1` (the latest candle by default)."""
+        history = self.history
+        end = len(history.closes) if end is None else end
+        if end < MIN_BARS:
+            return []
+        cfg = config.get("signals", {})
+        readings = self.long.view(end).facts()
+        change_pct = (history.closes[end - 1] / history.closes[end - 2] - 1) * 100
+        signals = []
+
+        for direction, market in (("long", self.long), ("short", self.short)):
+            if not cfg.get(direction, True):
+                continue
+            view = market.view(end)
+            for name, detector in (
+                ("trend_pullback", _trend_pullback),
+                ("breakout", _breakout),
+                ("oversold_bounce", _oversold_bounce),
+                ("ma_cross", _ma_cross),
+            ):
+                settings = cfg.get(name, {})
+                if not settings.get("enabled", True):
+                    continue
+                for found in detector(view, settings):
+                    signals.append(Signal(
+                        symbol=history.symbol,
+                        name=history.name,
+                        kind=found.kind,
+                        title=found.title,
+                        reason=found.reason,
+                        strategy=found.strategy,
+                        date=history.dates[end - 1],
+                        price=history.closes[end - 1],
+                        change_pct=change_pct,
+                        direction=direction,
+                        plan=_plan(view, found, config.get("plan", {})),
+                        facts=readings,
+                    ))
+        return signals
+
+
+WINDOW = 300  # candles a detector may look back over (enough for a 52-week lookback)
+
+
+class _Market:
+    """One direction's full price history, with indicators computed once.
+
+    With short=True everything is mirrored: closes are negated and highs and
+    lows swap, so a falling market looks like a rising one.
+    """
+
+    def __init__(self, history: History, short: bool):
         self.h = history
         self.short = short
         if short:
@@ -125,12 +159,57 @@ class _View:
             self.low = [-high for high in history.highs]
         else:
             self.close, self.high, self.low = history.closes, history.highs, history.lows
-        self.sma20 = indicators.sma(self.close, 20)
-        self.sma50 = indicators.sma(self.close, 50)
-        self.sma200 = indicators.sma(self.close, 200)
         self.rsi = indicators.rsi(self.close, 14)  # mirrored: 100 - the real RSI
         self.atr = indicators.atr(self.high, self.low, self.close, 14)
         self.avg_volume = indicators.sma(history.volumes, 20)
+        self._sma: dict[int, list] = {}
+        self._macd = None
+
+    def sma(self, period: int) -> list:
+        if period not in self._sma:
+            self._sma[period] = indicators.sma(self.close, period)
+        return self._sma[period]
+
+    def macd(self) -> tuple[list, list]:
+        if self._macd is None:
+            self._macd = indicators.macd(self.close)
+        return self._macd
+
+    def view(self, end: int | None = None) -> "_View":
+        return _View(self, len(self.close) if end is None else end)
+
+
+class _View:
+    """What a detector sees: the last candles up to one day, plus indicators.
+
+    All lists end at the day being scanned, so [-1] is "today" and [-2] is
+    "yesterday". `price()` turns a value back into a real price (it differs
+    from the value itself only for the mirrored, short view).
+    """
+
+    def __init__(self, market: _Market, end: int):
+        self.market = market
+        self.short = market.short
+        self.end = end
+        self.start = max(0, end - WINDOW)
+        self.close = market.close[self.start:end]
+        self.high = market.high[self.start:end]
+        self.low = market.low[self.start:end]
+        self.volumes = market.h.volumes[self.start:end]
+        self.sma20, self.sma50, self.sma200 = self.sma(20), self.sma(50), self.sma(200)
+        self.rsi = market.rsi[self.start:end]
+        self.atr = market.atr[self.start:end]
+        self.avg_volume = market.avg_volume[self.start:end]
+        # Only today's candle can still be forming.
+        latest = end == len(market.close)
+        self.session_fraction = market.h.session_fraction if latest else 1.0
+
+    def sma(self, period: int) -> list:
+        return self.market.sma(period)[self.start:self.end]
+
+    def macd(self) -> tuple[list, list]:
+        line, signal = self.market.macd()
+        return line[self.start:self.end], signal[self.start:self.end]
 
     def price(self, value: float) -> float:
         return -value if self.short else value
@@ -147,10 +226,10 @@ class _View:
         average = self.avg_volume[-2]
         if not average:
             return None
-        fraction = self.h.session_fraction
+        fraction = self.session_fraction
         if fraction < 0.1:
             return None  # too early in the session to judge volume
-        return self.h.volumes[-1] / fraction / average
+        return self.volumes[-1] / fraction / average
 
     def facts(self) -> dict[str, str]:
         """Readings for display. Only meaningful on the real (long) view."""
@@ -163,7 +242,7 @@ class _View:
                 readings[label] = f"{series[-1]:.2f}"
         ratio = self.volume_ratio()
         if ratio is not None:
-            estimate = " (projected)" if self.h.session_fraction < 1 else ""
+            estimate = " (projected)" if self.session_fraction < 1 else ""
             readings["Volume"] = f"{ratio:.1f}x average{estimate}"
         if self.atr[-1] is not None:
             readings["ATR(14)"] = f"{self.atr[-1]:.2f}"
@@ -243,13 +322,13 @@ def _trend_pullback(view: _View, settings: dict) -> list[_Found]:
     trigger = view.price(view.high[-2])
     if view.short:
         return [_Found(
-            "trend_rally", "Downtrend rally",
+            "trend_pullback", "trend_rally", "Downtrend rally",
             f"Downtrend (below the 200-day average) rallied to {reached} "
             f"and is now trading below yesterday's low of {trigger:.2f}.",
             extreme, "the rally high",
         )]
     return [_Found(
-        "trend_pullback", "Trend pullback",
+        "trend_pullback", "trend_pullback", "Trend pullback",
         f"Uptrend (above the 200-day average) pulled back to {reached} "
         f"and is now trading above yesterday's high of {trigger:.2f}.",
         extreme, "the pullback low",
@@ -276,13 +355,13 @@ def _breakout(view: _View, settings: dict) -> list[_Found]:
 
     if view.short:
         return [_Found(
-            "breakdown", "Breakdown",
+            "breakout", "breakdown", "Breakdown",
             f"Price moved below its {lookback}-day low of {view.price(level):.2f} "
             f"on {ratio:.1f}x average volume.",
             level, "the breakdown level",
         )]
     return [_Found(
-        "breakout", "Breakout",
+        "breakout", "breakout", "Breakout",
         f"Price moved above its {lookback}-day high of {view.price(level):.2f} "
         f"on {ratio:.1f}x average volume.",
         level, "the breakout level",
@@ -298,13 +377,13 @@ def _oversold_bounce(view: _View, settings: dict) -> list[_Found]:
     was, now = view.real_rsi(yesterday), view.real_rsi(today)
     if view.short:
         return [_Found(
-            "overbought_drop", "Overbought reversal",
+            "rsi_reversal", "overbought_drop", "Overbought reversal",
             f"RSI(14) crossed back below {view.real_rsi(level):.0f} "
             f"(yesterday {was:.0f}, now {now:.0f}).",
             min(view.low[-5:]), "the recent high",
         )]
     return [_Found(
-        "oversold_bounce", "Oversold bounce",
+        "rsi_reversal", "oversold_bounce", "Oversold bounce",
         f"RSI(14) crossed back above {level:.0f} (yesterday {was:.0f}, now {now:.0f}).",
         min(view.low[-5:]), "the recent low",
     )]
@@ -316,10 +395,10 @@ def _ma_cross(view: _View, settings: dict) -> list[_Found]:
     way = "below" if view.short else "above"
     found = []
 
-    fast = indicators.sma(view.close, fast_n)
-    slow = indicators.sma(view.close, slow_n)
+    fast, slow = view.sma(fast_n), view.sma(slow_n)
     if _crossed_above(fast, slow):
         found.append(_Found(
+            "ma_cross",
             "ma_cross_down" if view.short else "ma_cross",
             "Moving-average cross down" if view.short else "Moving-average cross",
             f"The {fast_n}-day average ({view.price(fast[-1]):.2f}) crossed {way} "
@@ -327,10 +406,11 @@ def _ma_cross(view: _View, settings: dict) -> list[_Found]:
         ))
 
     if settings.get("macd", True):
-        line, signal = indicators.macd(view.close)
+        line, signal = view.macd()
         if _crossed_above(line, signal):
             zero_side = "below" if view.price(line[-1]) < 0 else "above"
             found.append(_Found(
+                "macd_cross",
                 "macd_cross_down" if view.short else "macd_cross",
                 "MACD cross down" if view.short else "MACD cross",
                 f"MACD crossed {way} its signal line ({zero_side} the zero line).",

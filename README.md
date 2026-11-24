@@ -87,6 +87,10 @@ in the project folder. Trader opens in your browser at
 <http://127.0.0.1:8765>. Keep the small console window open while you use it;
 closing it stops Trader.
 
+- **Strategy** and **Direction** choose what a check looks for: all strategies
+  or one of them (trend pullback, breakout, RSI reversal, moving-average
+  cross, MACD cross), and long, short or both. The choice is remembered and
+  also applies to automatic checks and emails.
 - **Check entries** checks the whole watchlist now. Stocks with a signal
   appear as cards with Entry, SL, TP1 and TP2; the table lists every stock.
 - **Email me new entries** also emails the entries that have not been emailed
@@ -100,6 +104,33 @@ closing it stops Trader.
 
 The page only answers on your own computer; it is not reachable from the
 network.
+
+### Backtest tab
+
+The Backtest tab shows how the strategies would have done on past prices. Pick
+a strategy (or all), a direction, the whole watchlist or one stock, a period
+of 1, 2 or 5 years, which TP ends a trade, and after how many days a trade is
+closed if neither SL nor TP is reached. **Run backtest** then replays the
+period day by day, scanning each past day exactly as a live check would have,
+and trades every signal by its own plan.
+
+Results are in R: 1R is the amount risked on a trade, the distance from entry
+to SL. A trade stopped out loses 1R; one that reaches TP1 gains 2R. The page
+shows the number of trades, win rate, average and total result, profit factor
+(gains divided by losses; above 1 is profitable), the largest drawdown, a
+chart of the running total, a table per strategy and side, and every trade.
+
+What the backtest assumes:
+
+- A trade enters at the close of the signal day.
+- If SL and TP are both touched on the same day, the SL counts.
+- A price that opens beyond the SL or TP exits at that opening price.
+- One trade at a time per stock, strategy and side.
+- No commissions, slippage, or borrowing costs for shorts.
+
+It tells you how the rules behaved in the past on your stocks, which is not a
+promise about the future. A handful of stocks over a couple of years is also a
+small sample.
 
 ### Price source
 

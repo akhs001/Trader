@@ -21,11 +21,12 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import emailer, market
-from .data import SetupError, check_setup, source_of
+from . import backtest, emailer, market
+from .data import DataError, SetupError, check_setup, fetch_history, source_of
 from .main import GMAIL_LOGIN_HELP, ROOT, load_env_file
 from .scanner import (StockResult, check_watchlist, email_signals, load_config,
                       load_watchlist, new_signals)
+from .signals import STRATEGIES
 from .state import AlertState
 
 UI_FILE = Path(__file__).with_name("ui.html")
@@ -57,11 +58,18 @@ class App:
         self.settings_path = state_dir / "app.json"
         self.lock = threading.Lock()
         self.scan = {"running": False, "results": [], "total": 0, "current": "",
-                     "message": "", "finished": "", "error": "", "email": ""}
+                     "message": "", "finished": "", "error": "", "email": "",
+                     "strategy": "all", "direction": "both"}
         settings = self._load_settings()
         self.auto = bool(settings.get("auto"))
         self.interval = settings.get("interval")  # minutes; None = the default from the settings file
         self.last_auto = 0.0
+        # Which signals checks look for: one strategy or all, long, short or both.
+        self.strategy, self.direction = "all", "both"
+        self.set_selection(settings.get("strategy"), settings.get("direction"), save=False)
+        self.backtest = {"running": False, "done": 0, "total": 0, "current": "", "message": "",
+                         "error": "", "run": 0}
+        self.backtest_result: dict | None = None
 
     # --- what the page shows -------------------------------------------------
 
@@ -74,6 +82,9 @@ class App:
             "scan": scan,
             "auto": {"enabled": self.auto, "interval": self._interval(),
                      "min": MIN_INTERVAL, "max": MAX_INTERVAL},
+            "strategies": [{"id": key, "name": name} for key, name in STRATEGIES.items()],
+            "selection": {"strategy": self.strategy, "direction": self.direction},
+            "backtest": dict(self.backtest),
             "market": {"open": market.is_scan_time(), "time": now.strftime("%a %H:%M")},
             "setup": self._setup(),
             # True once update.bat has replaced the program files: the page is
@@ -114,7 +125,8 @@ class App:
             if self.scan["running"]:
                 return False
             self.scan.update(running=True, results=[], total=len(symbols), current="",
-                             message="", error="", email="")
+                             message="", error="", email="",
+                             strategy=self.strategy, direction=self.direction)
         threading.Thread(target=self._check, args=(symbols, send_email), daemon=True).start()
         return True
 
@@ -128,6 +140,7 @@ class App:
                 on_start=lambda symbol, _: self._update(current=symbol, message=""),
                 on_result=lambda result: self._add_result(result, state, config),
                 notify=lambda text: self._update(message=text),
+                strategy=self.scan["strategy"], direction=self.scan["direction"],
             )
             fresh = new_signals(results, state, config)
             if send_email and fresh:
@@ -164,8 +177,76 @@ class App:
             self.interval = min(max(int(interval), MIN_INTERVAL), MAX_INTERVAL)
         except (TypeError, ValueError):
             pass  # no usable number sent: keep the current interval
+        self._save_settings()
+
+    def set_selection(self, strategy, direction, save: bool = True) -> None:
+        """Choose which signals checks look for. Unknown values are ignored."""
+        if strategy == "all" or strategy in STRATEGIES:
+            self.strategy = strategy
+        if direction in ("both", "long", "short"):
+            self.direction = direction
+        if save:
+            self._save_settings()
+
+    def _save_settings(self) -> None:
         self.settings_path.parent.mkdir(parents=True, exist_ok=True)
-        self.settings_path.write_text(json.dumps({"auto": enabled, "interval": self.interval}))
+        self.settings_path.write_text(json.dumps({
+            "auto": self.auto, "interval": self.interval,
+            "strategy": self.strategy, "direction": self.direction,
+        }))
+
+    # --- backtesting ---------------------------------------------------------
+
+    def start_backtest(self, body: dict) -> str:
+        """Start a backtest in the background. Returns an error message or ''."""
+        watchlist = load_watchlist(self.watchlist_path)
+        symbol = str(body.get("symbol") or "").strip().upper()
+        symbols = [symbol] if symbol in watchlist else watchlist
+        if not symbols:
+            return "Your watchlist is empty."
+        options = backtest.Options(
+            strategy=body.get("strategy") if body.get("strategy") in STRATEGIES else "all",
+            direction=body.get("direction") if body.get("direction") in ("long", "short") else "both",
+            years=_number(body.get("years"), 2, 1, 5),
+            target=_number(body.get("target"), 1, 1, 2),
+            max_days=_number(body.get("max_days"), 30, 1, 250),
+        )
+        with self.lock:
+            if self.backtest["running"]:
+                return "A backtest is already running."
+            self.backtest.update(running=True, done=0, total=len(symbols), current="",
+                                 message="", error="")
+        threading.Thread(target=self._backtest, args=(symbols, options), daemon=True).start()
+        return ""
+
+    def _backtest(self, symbols: list[str], options: backtest.Options) -> None:
+        error, trades, skipped = "", [], []
+        try:
+            config = self._config()
+            for index, symbol in enumerate(symbols):
+                self._progress(current=symbol, done=index, message="")
+                try:
+                    history = fetch_history(symbol, source=source_of(config), years=options.years,
+                                            notify=lambda text: self._progress(message=text))
+                except DataError as problem:
+                    skipped.append(str(problem))
+                    continue
+                trades.extend(backtest.backtest_stock(history, config, options))
+            result = backtest.report(trades)
+            result.update(options=vars(options), symbols=symbols, skipped=skipped,
+                          finished=datetime.now().strftime("%H:%M:%S"))
+            self.backtest_result = result
+        except SetupError as problem:
+            error = str(problem)
+        except Exception as problem:  # show the problem on the page instead of dying silently
+            error = f"The backtest failed: {problem}"
+        with self.lock:
+            self.backtest.update(running=False, current="", message="", error=error,
+                                 done=len(symbols), run=self.backtest["run"] + 1)
+
+    def _progress(self, **changes) -> None:
+        with self.lock:
+            self.backtest.update(changes)
 
     def run_auto(self) -> None:
         """Background loop: while switched on, check on a timer during market hours."""
@@ -223,6 +304,13 @@ class App:
         return f"Test email sent to {recipient}."
 
 
+def _number(value, default: int, low: int, high: int) -> int:
+    try:
+        return min(max(int(value), low), high)
+    except (TypeError, ValueError):
+        return default
+
+
 def _count(items: list, one: str, many: str) -> str:
     return f"{len(items)} {one if len(items) == 1 else many}"
 
@@ -261,6 +349,8 @@ def make_handler(app: App):
                 self._send(200, UI_FILE.read_bytes(), "text/html; charset=utf-8")
             elif self.path == "/api/state":
                 self._json(app.snapshot())
+            elif self.path == "/api/backtest":
+                self._json({"result": app.backtest_result})
             else:
                 self._json({"error": "Not found"}, 404)
 
@@ -288,6 +378,11 @@ def make_handler(app: App):
             elif self.path == "/api/auto":
                 app.set_auto(bool(body.get("enabled")), body.get("interval"))
                 self._json({"error": ""})
+            elif self.path == "/api/selection":
+                app.set_selection(body.get("strategy"), body.get("direction"))
+                self._json({"error": ""})
+            elif self.path == "/api/backtest":
+                self._json({"error": app.start_backtest(body)})
             elif self.path == "/api/test-email":
                 self._json({"message": app.send_test_email()})
             elif self.path == "/api/quit":

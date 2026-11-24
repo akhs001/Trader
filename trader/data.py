@@ -54,12 +54,17 @@ def check_setup(source: str) -> None:
         raise SetupError(f'Unknown price source "{source}". Use "yahoo" or "twelvedata".')
 
 
-def fetch_history(symbol: str, source: str = DEFAULT_SOURCE, notify=print) -> History:
-    """Download daily candles. `notify` is told when a rate-limit wait starts."""
+def fetch_history(symbol: str, source: str = DEFAULT_SOURCE, notify=print,
+                  years: float = 1) -> History:
+    """Download daily candles covering the last `years`, plus a year of run-up.
+
+    The extra year lets the 200-day average settle before the period starts.
+    `notify` is told when a rate-limit wait starts.
+    """
     if source == "twelvedata":
-        return fetch_twelve_data(symbol, notify=notify)
+        return fetch_twelve_data(symbol, notify=notify, bars=min(int(years * 252) + 260, 5000))
     check_setup(source)
-    return fetch_yahoo(symbol)
+    return fetch_yahoo(symbol, period="2y" if years <= 1 else "5y" if years <= 4 else "10y")
 
 
 # --- Yahoo Finance (yfinance) ------------------------------------------------
@@ -75,13 +80,13 @@ def _yfinance():
     return yfinance
 
 
-def fetch_yahoo(symbol: str) -> History:
+def fetch_yahoo(symbol: str, period: str = "2y") -> History:
     yfinance = _yfinance()
     # yfinance reports problems through its logger; keep the console clean and
     # turn an empty result into our own error instead.
     logging.getLogger("yfinance").setLevel(logging.CRITICAL)
     try:
-        frame = yfinance.Ticker(symbol).history(period="2y", interval="1d", auto_adjust=True)
+        frame = yfinance.Ticker(symbol).history(period=period, interval="1d", auto_adjust=True)
     except Exception as error:  # yfinance raises many different error types
         raise DataError(f"{symbol}: could not download prices ({error})") from error
     return history_from_frame(symbol, frame)
@@ -135,9 +140,9 @@ def api_key() -> str:
     return key
 
 
-def fetch_twelve_data(symbol: str, retries: int = 3, notify=print) -> History:
+def fetch_twelve_data(symbol: str, retries: int = 3, notify=print, bars: int = 0) -> History:
     query = urllib.parse.urlencode(
-        {"symbol": symbol, "interval": "1day", "outputsize": BARS, "order": "asc"}
+        {"symbol": symbol, "interval": "1day", "outputsize": max(bars, BARS), "order": "asc"}
     )
     request = urllib.request.Request(
         f"{API_URL}?{query}", headers={"Authorization": f"apikey {api_key()}"}

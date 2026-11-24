@@ -328,6 +328,111 @@ class ShortTests(unittest.TestCase):
         self.assertIn(">SHORT</span>", message.get_body(("html",)).get_content())
 
 
+class BacktestTests(unittest.TestCase):
+    def setup_then(self, later, short=False):
+        """A breakout on a flat stock, followed by the given (open, high, low, close) days."""
+        from trader import backtest
+        closes = [100.0] * 259 + [103.0]
+        history = make_history(closes, volumes=[1_000_000.0] * 259 + [2_000_000.0])
+        plan = next(s for s in scan(history, CONFIG) if s.kind == "breakout").plan
+        for i, (open_, high, low, close) in enumerate(later):
+            history.dates.append((date(2025, 1, 1) + timedelta(days=i)).isoformat())
+            history.opens.append(open_); history.highs.append(high)
+            history.lows.append(low); history.closes.append(close)
+            history.volumes.append(1_000_000.0)
+        if short:
+            history, top = mirrored(history), 2 * max(history.highs)
+        options = backtest.Options(strategy="breakout", direction="short" if short else "long",
+                                   years=0.1, target=1, max_days=3)
+        trades = backtest.backtest_stock(history, CONFIG, options)
+        return plan, trades[0]
+
+    def test_target_hit(self):
+        plan, trade = self.setup_then([(103, 104, 102.5, 103.5), (104, 110, 103.5, 109)])
+        self.assertEqual((trade.reason, trade.days), ("target", 2))
+        self.assertAlmostEqual(trade.exit, plan.targets[0])
+        self.assertAlmostEqual(trade.r, 2.0)
+
+    def test_stop_hit(self):
+        plan, trade = self.setup_then([(103, 103.5, 99, 100)])
+        self.assertEqual(trade.reason, "stop")
+        self.assertAlmostEqual(trade.exit, plan.stop)
+        self.assertAlmostEqual(trade.r, -1.0)
+
+    def test_stop_wins_when_both_are_touched_the_same_day(self):
+        _, trade = self.setup_then([(103, 115, 95, 110)])
+        self.assertEqual(trade.reason, "stop")
+        self.assertAlmostEqual(trade.r, -1.0)
+
+    def test_gap_through_the_stop_exits_at_the_open(self):
+        _, trade = self.setup_then([(97, 98, 96, 97)])
+        self.assertEqual((trade.reason, trade.exit), ("stop", 97))
+        self.assertLess(trade.r, -1.0)
+
+    def test_gap_through_the_target_exits_at_the_open(self):
+        _, trade = self.setup_then([(112, 113, 111, 112)])
+        self.assertEqual((trade.reason, trade.exit), ("target", 112))
+        self.assertGreater(trade.r, 2.0)
+
+    def test_time_limit(self):
+        _, trade = self.setup_then([(103, 104, 102, 103.5)] * 5)
+        self.assertEqual((trade.reason, trade.days, trade.exit), ("time", 3, 103.5))
+
+    def test_trade_still_open_at_the_end(self):
+        from trader import backtest
+        _, trade = self.setup_then([(103, 104, 102, 103.5)])
+        self.assertEqual(trade.reason, "open")
+        self.assertEqual(backtest.summarize([trade]), {"trades": 0, "open": 1})
+
+    def test_short_trade_is_the_long_trade_upside_down(self):
+        _, long_trade = self.setup_then([(103, 104, 102.5, 103.5), (104, 110, 103.5, 109)])
+        _, short_trade = self.setup_then([(103, 104, 102.5, 103.5), (104, 110, 103.5, 109)], short=True)
+        self.assertEqual((short_trade.direction, short_trade.reason), ("short", "target"))
+        self.assertAlmostEqual(short_trade.r, long_trade.r)
+        self.assertLess(short_trade.exit, short_trade.entry)
+
+    def test_only_the_chosen_strategy_and_direction_are_traded(self):
+        from trader import backtest
+        closes = [200 - 0.002 * i * i for i in range(200)] + [120 + i * 1.5 for i in range(1, 80)]
+        history = make_history(closes)
+        everything = backtest.backtest_stock(history, CONFIG, backtest.Options(years=1))
+        self.assertGreater(len({t.strategy for t in everything}), 1)
+        only = backtest.backtest_stock(history, CONFIG, backtest.Options(strategy="macd_cross", direction="long", years=1))
+        self.assertTrue(only)
+        self.assertEqual({(t.strategy, t.direction) for t in only}, {("macd_cross", "long")})
+
+    def test_past_days_scan_exactly_like_live_days(self):
+        from trader.signals import Analysis
+        import math
+        closes = [100 + 20 * math.sin(i / 9) + i * 0.05 + (i % 7) * 0.4 for i in range(420)]
+        volumes = [1_000_000.0 * (1 + (i % 11) / 5) for i in range(420)]
+        history = make_history(closes, volumes=volumes)
+        analysis, compared = Analysis(history), 0
+        for end in range(205, 420):
+            part = make_history(closes[:end], volumes=volumes[:end])
+            live = [(s.kind, s.reason, s.plan.stop, s.plan.targets) for s in scan(part, CONFIG)]
+            past = [(s.kind, s.reason, s.plan.stop, s.plan.targets) for s in analysis.scan(CONFIG, end=end)]
+            self.assertEqual(live, past)
+            compared += len(live)
+        self.assertGreater(compared, 20)
+
+    def test_summary_numbers(self):
+        from trader import backtest
+        def trade(r, day):
+            return backtest.Trade("T", "breakout", "Breakout", "long", "2025-01-01", 100, 95, 110,
+                                  f"2025-02-{day:02d}", 100 + 5 * r, "target" if r > 0 else "stop", r, 5 * r, 4)
+        stats = backtest.summarize([trade(2, 1), trade(-1, 2), trade(-1, 3), trade(2, 4)])
+        self.assertEqual(stats["trades"], 4)
+        self.assertAlmostEqual(stats["win_rate"], 50)
+        self.assertAlmostEqual(stats["avg_r"], 0.5)
+        self.assertAlmostEqual(stats["total_r"], 2)
+        self.assertAlmostEqual(stats["profit_factor"], 2)
+        self.assertAlmostEqual(stats["max_drawdown_r"], 2)
+        report = backtest.report([trade(2, 1), trade(-1, 2)])
+        self.assertEqual([p["r"] for p in report["curve"]], [2, 1])
+        self.assertEqual(report["rows"][0]["name"], "Breakout")
+
+
 class DataTests(unittest.TestCase):
     def payload(self):
         # Shape of a real Twelve Data /time_series response: newest first, numbers as strings.
@@ -534,7 +639,7 @@ class AppTests(unittest.TestCase):
         (root / "config.toml").write_text("[data]\nsource = \"twelvedata\"\n[schedule]\ninterval_minutes = 15\n")
         self.sent = []
 
-        def fake_fetch(symbol, source="yahoo", notify=print):
+        def fake_fetch(symbol, source="yahoo", notify=print, years=1):
             if symbol == "BBB":
                 raise DataError("BBB: symbol not found")
             history = make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
@@ -665,6 +770,51 @@ class AppTests(unittest.TestCase):
         # One check at once, then one per minute: 4 in 200 seconds.
         self.assertEqual(len(started), 4)
         self.assertEqual([round(b - a) for a, b in zip(started, started[1:])], [60, 60, 60])
+
+    def test_checks_use_the_chosen_strategy(self):
+        self.assertEqual(self.call("/api/state")[1]["selection"], {"strategy": "all", "direction": "both"})
+        self.call("/api/selection", {"strategy": "breakout", "direction": "long"})
+        scan = self.check(email=False)
+        titles = [s["title"] for e in scan["results"][0]["entries"] for s in e["signals"]]
+        self.assertEqual(titles, ["Breakout"])
+        self.assertEqual((scan["strategy"], scan["direction"]), ("breakout", "long"))
+
+        self.call("/api/selection", {"strategy": "breakout", "direction": "short"})
+        self.assertEqual(self.check(email=False)["results"][0]["entries"], [])
+        # Unknown values are ignored, and the choice survives a restart.
+        self.call("/api/selection", {"strategy": "nonsense", "direction": "sideways"})
+        self.assertEqual(self.call("/api/state")[1]["selection"], {"strategy": "breakout", "direction": "short"})
+        from trader import app as app_module
+        reopened = app_module.App(self.app.watchlist_path, self.app.config_path, self.app.state_path.parent)
+        self.assertEqual((reopened.strategy, reopened.direction), ("breakout", "short"))
+
+    def test_backtest_runs_and_reports(self):
+        from unittest import mock
+        from trader import app as app_module
+
+        def history_for(symbol, source="yahoo", notify=print, years=1):
+            if symbol == "BBB":
+                raise DataError("BBB: symbol not found")
+            closes = [200 - 0.002 * i * i for i in range(200)] + [120 + i * 1.5 for i in range(1, 80)]
+            history = make_history(closes)
+            history.symbol = symbol
+            return history
+
+        self.assertIsNone(self.call("/api/backtest")[1]["result"])
+        with mock.patch.object(app_module, "fetch_history", history_for):
+            self.assertEqual(self.call("/api/backtest", {"strategy": "macd_cross", "years": 1, "target": 2})[1]["error"], "")
+            for _ in range(2000):
+                status = self.call("/api/state")[1]["backtest"]
+                if not status["running"]:
+                    break
+        self.assertEqual((status["error"], status["run"]), ("", 1))
+        result = self.call("/api/backtest")[1]["result"]
+        self.assertEqual(result["options"]["strategy"], "macd_cross")
+        self.assertEqual(result["options"]["target"], 2)
+        self.assertEqual(result["skipped"], ["BBB: symbol not found"])
+        self.assertTrue(result["trades"])
+        self.assertEqual({t["strategy"] for t in result["trades"]}, {"macd_cross"})
+        self.assertEqual({t["symbol"] for t in result["trades"]}, {"AAA"})
 
     def test_page_is_told_when_the_program_was_updated(self):
         from unittest import mock

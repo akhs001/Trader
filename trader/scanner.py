@@ -10,6 +10,12 @@ from pathlib import Path
 from . import emailer, signals
 from .data import DataError, fetch_history, source_of
 from .signals import MIN_BARS, Signal
+
+
+def wanted(signal: Signal, strategy: str, direction: str) -> bool:
+    """Whether a signal belongs to the chosen strategy and direction."""
+    return (strategy in ("all", signal.strategy)
+            and direction in ("both", signal.direction))
 from .state import AlertState
 
 
@@ -25,8 +31,13 @@ class StockResult:
     error: str = ""  # why its prices could not be read, if they could not
 
 
-def check_stock(symbol: str, config: dict, notify=print) -> StockResult:
-    """Download one stock and look for entry signals. Raises SetupError."""
+def check_stock(symbol: str, config: dict, notify=print,
+                strategy: str = "all", direction: str = "both") -> StockResult:
+    """Download one stock and look for entry signals. Raises SetupError.
+
+    `strategy` (a key of signals.STRATEGIES) and `direction` ("long" or
+    "short") narrow the result to the signals the user asked for.
+    """
     try:
         history = fetch_history(symbol, source=source_of(config), notify=notify)
     except DataError as error:
@@ -36,7 +47,7 @@ def check_stock(symbol: str, config: dict, notify=print) -> StockResult:
         price=history.closes[-1],
         date=history.dates[-1],
         facts=signals.facts(history),
-        signals=signals.scan(history, config),
+        signals=[s for s in signals.scan(history, config) if wanted(s, strategy, direction)],
     )
     if len(history.closes) >= 2:
         result.change_pct = (history.closes[-1] / history.closes[-2] - 1) * 100
@@ -46,14 +57,14 @@ def check_stock(symbol: str, config: dict, notify=print) -> StockResult:
 
 
 def check_watchlist(symbols: list[str], config: dict, on_start=None, on_result=None,
-                    notify=print) -> list[StockResult]:
+                    notify=print, strategy: str = "all", direction: str = "both") -> list[StockResult]:
     results = []
     for index, symbol in enumerate(symbols):
         if on_start:
             on_start(symbol, index)
         if index:
             time.sleep(0.3)  # stay polite to the data provider
-        results.append(check_stock(symbol, config, notify))
+        results.append(check_stock(symbol, config, notify, strategy, direction))
         if on_result:
             on_result(results[-1])
     return results
