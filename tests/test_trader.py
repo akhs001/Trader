@@ -416,5 +416,121 @@ class MarketHoursTests(unittest.TestCase):
                 os.environ.pop("TRADER_TEST_B", None)
 
 
+class AppTests(unittest.TestCase):
+    """The app's server, with prices replaced by canned histories."""
+
+    def setUp(self):
+        import json, os, urllib.request
+        from unittest import mock
+        from trader import app as app_module, scanner
+        self.json, self.urllib = json, urllib.request
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        (root / "watchlist.txt").write_text("AAA\nBBB\n")
+        (root / "config.toml").write_text("[schedule]\ninterval_minutes = 15\n")
+        self.sent = []
+
+        def fake_fetch(symbol, notify=print):
+            if symbol == "BBB":
+                raise DataError("BBB: symbol not found")
+            history = make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
+            history.symbol = history.name = symbol
+            history.dates[-1] = date.today().isoformat()
+            return history
+
+        env = {"TWELVE_DATA_API_KEY": "k", "GMAIL_ADDRESS": "me@example.com", "GMAIL_APP_PASSWORD": "p"}
+        for patcher in (
+            mock.patch.dict(os.environ, env),
+            mock.patch.object(scanner, "fetch_history", fake_fetch),
+            mock.patch.object(scanner.time, "sleep"),
+            mock.patch.object(emailer, "send", lambda message, sender, password: self.sent.append(message)),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.app = app_module.App(root / "watchlist.txt", root / "config.toml", root / ".state")
+        self.server = app_module.ThreadingHTTPServer(("127.0.0.1", 0), app_module.make_handler(self.app))
+        import threading
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def call(self, path, body=None, headers=None):
+        import urllib.error
+        request = self.urllib.Request(self.base + path)
+        if body is not None:
+            request.data = self.json.dumps(body).encode()
+            request.add_header("X-Trader", "1")
+        for key, value in (headers or {}).items():
+            request.add_header(key, value)
+        opener = self.urllib.build_opener(self.urllib.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=10) as response:
+                return response.status, self.json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            return error.code, self.json.loads(error.read())
+
+    def check(self, email):
+        import time
+        self.assertEqual(self.call("/api/check", {"email": email})[1]["error"], "")
+        for _ in range(200):
+            scan = self.call("/api/state")[1]["scan"]
+            if not scan["running"]:
+                return scan
+            time.sleep(0.02)
+        self.fail("check did not finish")
+
+    def test_page_is_served(self):
+        opener = self.urllib.build_opener(self.urllib.ProxyHandler({}))
+        with opener.open(self.base + "/", timeout=10) as response:
+            self.assertIn(b"Check entries", response.read())
+
+    def test_check_shows_plan_and_emails_once(self):
+        scan = self.check(email=True)
+        rows = {row["symbol"]: row for row in scan["results"]}
+        self.assertEqual(rows["BBB"]["error"], "symbol not found")
+        self.assertIn("Breakout", [s["title"] for s in rows["AAA"]["signals"]])
+        self.assertTrue(all(s["new"] for s in rows["AAA"]["signals"]))
+        self.assertEqual([level["label"] for level in rows["AAA"]["plan"]["levels"]],
+                         ["Entry", "SL", "TP1", "TP2"])
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("Emailed", scan["email"])
+
+        again = self.check(email=True)
+        self.assertEqual(len(self.sent), 1)  # nothing new, so no second email
+        self.assertFalse(any(s["new"] for s in again["results"][0]["signals"]))
+
+    def test_check_without_email(self):
+        scan = self.check(email=False)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(scan["email"], "")
+        self.assertTrue(scan["results"][0]["signals"][0]["new"])
+
+    def test_watchlist_editing(self):
+        self.assertEqual(self.call("/api/watchlist/add", {"symbol": " tsla "})[1]["error"], "")
+        self.assertIn("already", self.call("/api/watchlist/add", {"symbol": "TSLA"})[1]["error"])
+        self.assertIn("ticker", self.call("/api/watchlist/add", {"symbol": "no spaces!"})[1]["error"])
+        self.call("/api/watchlist/remove", {"symbol": "AAA"})
+        self.assertEqual(self.call("/api/state")[1]["watchlist"], ["BBB", "TSLA"])
+
+    def test_auto_setting_is_remembered(self):
+        from trader import app as app_module
+        self.call("/api/auto", {"enabled": True})
+        self.assertTrue(self.call("/api/state")[1]["auto"]["enabled"])
+        reopened = app_module.App(self.app.watchlist_path, self.app.config_path, self.app.state_path.parent)
+        self.assertTrue(reopened.auto)
+
+    def test_other_sites_cannot_use_the_app(self):
+        request = self.urllib.Request(self.base + "/api/check", data=b"{}")  # no X-Trader header
+        opener = self.urllib.build_opener(self.urllib.ProxyHandler({}))
+        import urllib.error
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            opener.open(request, timeout=10)
+        self.assertEqual(raised.exception.code, 403)
+        self.assertEqual(self.call("/api/state", headers={"Host": "evil.example"})[0], 403)
+        self.assertEqual(self.sent, [])
+
+
 if __name__ == "__main__":
     unittest.main()

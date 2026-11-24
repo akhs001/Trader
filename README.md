@@ -1,8 +1,9 @@
 # Trader
 
-A watchlist scanner that runs on your own computer. While the US market is
-open it checks the stocks in `watchlist.txt` every 15 minutes and emails you
-when one shows a possible entry. It only alerts; it never places trades.
+A watchlist scanner that runs on your own computer and opens in your browser.
+Press **Check entries** and it checks every stock on your watchlist for a
+possible entry, shows each one with Entry, SL and TP, and can email them to
+you. It only alerts; it never places trades.
 
 ## Signals
 
@@ -52,30 +53,42 @@ stays quiet for `cooldown_days` (default 5).
    <https://myaccount.google.com/apppasswords>. It is 16 letters long.
 5. **Add your details.** Copy `.env.example` to a new file named `.env` in the
    same folder and fill in the API key, your Gmail address and the app password.
-6. **Edit `watchlist.txt`** with your own tickers, one per line.
+6. **Set your watchlist** in the app, or edit `watchlist.txt` (one ticker per
+   line).
 
 ## Running
 
-Open a terminal in the project folder (on Windows: type `cmd` in the folder's
-address bar). On Windows use `py` in place of `python3`.
+On Windows, double-click `start.bat`. On Mac or Linux, run
+`python3 -m trader.app` in the project folder. Trader opens in your browser at
+<http://127.0.0.1:8765>. Keep the small console window open while you use it;
+closing it stops Trader.
+
+- **Check entries** checks the whole watchlist now. Stocks with a signal
+  appear as cards with Entry, SL, TP1 and TP2; the table lists every stock.
+- **Email me new entries** also emails the entries that have not been emailed
+  in the last `cooldown_days`. Without Gmail details in `.env`, entries are
+  only shown on the page.
+- **Check automatically** repeats the check every `interval_minutes` on
+  weekdays from 9:30 to 16:00 New York time and emails new entries. It is off
+  until you tick it, and your computer has to be on and awake.
+- Add and remove tickers under **Watchlist**, or edit `watchlist.txt`.
+
+The page only answers on your own computer; it is not reachable from the
+network.
+
+Each check uses one Twelve Data request per stock. The free plan limits
+requests per minute and per day: with a long watchlist a check pauses when it
+reaches the per-minute limit and continues by itself.
+
+### Without the browser
 
 ```sh
-python3 -m trader.main --dry-run     # check the stocks now, print the result, send nothing
+python3 -m trader.main --dry-run     # check now, print the result, send nothing
 python3 -m trader.main --test-email  # send yourself a test email
-python3 -m trader.main --loop        # start the bot
+python3 -m trader.main --loop        # check every interval_minutes, in the console
 ```
 
-On Windows you can also start the bot by double-clicking `start.bat`.
-
-Leave the window open. The bot scans on weekdays from 9:30 to 16:00 New York
-time and waits quietly outside those hours. Your computer has to be on and
-awake for it to work. Changes to `watchlist.txt` and `config.toml` are picked
-up at the next scan without restarting.
-
-The bot uses one Twelve Data request per stock per scan. The free plan limits
-requests per minute and per day: with a long watchlist the bot pauses when it
-reaches the per-minute limit, and if you run out for the day, shorten the
-watchlist or raise `interval_minutes` in `config.toml`.
+On Windows use `py` in place of `python3`.
 
 ## Tests
 

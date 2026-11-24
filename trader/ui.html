@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trader</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --line: #e1e4e8; --text: #1b1f24; --muted: #646d78;
+    --accent: #1f6feb; --accent-text: #ffffff; --up: #17803d; --down: #cf222e;
+    --soft: #f0f2f5; --warn-bg: #fff4d6; --warn-text: #6b4a00; --new: #17803d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --card: #181c22; --line: #2a3038; --text: #e8ebef; --muted: #98a2ae;
+      --accent: #4c8dff; --accent-text: #0b1220; --up: #4cc38a; --down: #ff7b72;
+      --soft: #20262e; --warn-bg: #3a2f10; --warn-text: #f2d48a; --new: #4cc38a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 56px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -.01em; }
+  h2 { font-size: 13px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+       color: var(--muted); margin: 28px 0 10px; }
+  .pill { font-size: 13px; padding: 4px 10px; border-radius: 999px; background: var(--soft);
+          color: var(--muted); white-space: nowrap; }
+  .pill b { color: var(--text); font-weight: 600; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
+  .dot.open { background: var(--up); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  .banner { background: var(--warn-bg); color: var(--warn-text); border-radius: 10px;
+            padding: 10px 14px; margin-bottom: 12px; font-size: 14px; }
+  .banner.error { background: color-mix(in srgb, var(--down) 14%, var(--card)); color: var(--text); }
+  code { font: 13px ui-monospace, Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 4px; }
+
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 16px 24px; }
+  button { font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--card); color: var(--text); padding: 7px 12px; }
+  button:hover { border-color: var(--muted); }
+  button:disabled { opacity: .6; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text);
+                   font-size: 16px; font-weight: 600; padding: 11px 22px; }
+  button.link { border: 0; background: none; padding: 0; color: var(--accent); }
+  .options { display: grid; gap: 6px; font-size: 14px; }
+  .options label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .status { margin-top: 12px; font-size: 14px; color: var(--muted); min-height: 21px; }
+  .bar { height: 4px; border-radius: 2px; background: var(--soft); margin-top: 10px; overflow: hidden; display: none; }
+  .bar span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  .bar.on { display: block; }
+
+  .entry { margin-bottom: 12px; }
+  .entry-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; }
+  .sym { font-size: 20px; font-weight: 700; }
+  .price { font-size: 16px; font-variant-numeric: tabular-nums; }
+  .up { color: var(--up); } .down { color: var(--down); }
+  .small { font-size: 12px; color: var(--muted); }
+  .levels { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin: 14px 0 6px; }
+  .level { background: var(--soft); border-radius: 8px; padding: 8px 6px; text-align: center; }
+  .level .label { font-size: 11px; font-weight: 700; letter-spacing: .05em; color: var(--muted); }
+  .level .value { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .level.sl .value { color: var(--down); } .level.tp .value { color: var(--up); }
+  .signal { margin-top: 12px; }
+  .signal .title { font-size: 12px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--accent); }
+  .badge { font-size: 11px; font-weight: 600; letter-spacing: 0; text-transform: none; margin-left: 8px;
+           padding: 1px 7px; border-radius: 999px; background: var(--soft); color: var(--muted); }
+  .badge.new { background: color-mix(in srgb, var(--new) 16%, transparent); color: var(--new); }
+  .facts { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 12px; font-size: 13px; color: var(--muted); }
+  .facts b { color: var(--text); font-weight: 600; }
+  .entry a { font-size: 13px; color: var(--accent); }
+
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th { text-align: left; font-size: 12px; font-weight: 600; color: var(--muted); padding: 0 10px 8px 0; white-space: nowrap; }
+  td { padding: 9px 10px 9px 0; border-top: 1px solid var(--line); white-space: nowrap; }
+  td.num, th.num { text-align: right; }
+  td.sym-cell { font-weight: 700; }
+  td.status-cell { white-space: normal; color: var(--muted); }
+  td.status-cell.hit { color: var(--up); font-weight: 600; }
+  td.status-cell.bad { color: var(--down); }
+  td:last-child, th:last-child { padding-right: 0; text-align: right; }
+  .remove { border: 0; background: none; color: var(--muted); font-size: 18px; line-height: 1; padding: 2px 6px; }
+  .remove:hover { color: var(--down); }
+  form.add { display: flex; gap: 8px; margin-top: 14px; }
+  input[type=text] { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line);
+                     border-radius: 8px; padding: 7px 10px; width: 150px; text-transform: uppercase; }
+  input::placeholder { text-transform: none; }
+  .form-error { color: var(--down); font-size: 13px; margin-top: 6px; min-height: 20px; }
+  .empty { color: var(--muted); font-size: 14px; }
+  footer { margin-top: 28px; font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Trader</h1>
+    <span class="pill" id="market"></span>
+  </header>
+
+  <div id="banners"></div>
+
+  <section class="card">
+    <div class="controls">
+      <button class="primary" id="check">Check entries</button>
+      <div class="options">
+        <label><input type="checkbox" id="email"> <span id="email-label">Email me new entries</span></label>
+        <label><input type="checkbox" id="auto"> <span id="auto-label">Check automatically while the market is open</span></label>
+      </div>
+    </div>
+    <div class="bar" id="bar"><span></span></div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <div id="entries"></div>
+
+  <h2>Watchlist</h2>
+  <section class="card">
+    <div class="table-wrap" id="watchlist"></div>
+    <form class="add" id="add-form">
+      <input type="text" id="add-input" placeholder="Add ticker" maxlength="15" autocomplete="off" aria-label="Ticker to add">
+      <button type="submit">Add</button>
+    </form>
+    <div class="form-error" id="add-error"></div>
+  </section>
+
+  <footer>
+    Entry, SL and TP are calculated by fixed rules from the latest price; they are not predictions
+    and not financial advice. Check the chart before trading.
+    <span id="test-email-wrap"> · <button class="link" id="test-email">Send a test email</button> <span id="test-email-result"></span></span>
+  </footer>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let state = null;
+let offline = false;
+let timer = null;
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (key === "class") node.className = value;
+    else if (key === "text") node.textContent = value;
+    else node.setAttribute(key, value);
+  }
+  for (const child of children) if (child) node.append(child);
+  return node;
+}
+
+async function post(path, body = {}) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {"Content-Type": "application/json", "X-Trader": "1"},
+    body: JSON.stringify(body),
+  });
+  return response.json();
+}
+
+async function refresh() {
+  clearTimeout(timer);
+  try {
+    state = await (await fetch("/api/state")).json();
+    offline = false;
+  } catch (error) {
+    offline = true;
+  }
+  render();
+  timer = setTimeout(refresh, state && state.scan.running ? 700 : 10000);
+}
+
+function money(value) { return value == null ? "" : value.toFixed(2); }
+function percent(value) { return value == null ? "" : (value >= 0 ? "+" : "") + value.toFixed(2) + "%"; }
+
+function render() {
+  const banners = $("banners");
+  banners.replaceChildren();
+  if (offline) {
+    banners.append(el("div", {class: "banner error",
+      text: "The Trader program is not running. Start it again (start.bat) and reload this page."}));
+    $("check").disabled = true;
+    return;
+  }
+  if (!state) return;
+  const {scan, setup, market, auto, watchlist} = state;
+
+  $("market").replaceChildren(
+    el("span", {class: "dot" + (market.open ? " open" : "")}),
+    el("b", {text: market.open ? "Market open" : "Market closed"}),
+    document.createTextNode(" · New York " + market.time));
+
+  if (!setup.data) banners.append(banner("Price data is not set up. Put your Twelve Data key in the ", ".env",
+    " file as TWELVE_DATA_API_KEY, then restart Trader."));
+  if (!setup.email) banners.append(banner("Email is not set up, so entries are only shown here. To get emails, put GMAIL_ADDRESS and GMAIL_APP_PASSWORD in the ", ".env", " file, then restart Trader."));
+  if (scan.error) banners.append(el("div", {class: "banner error", text: scan.error}));
+
+  // Controls
+  $("check").disabled = scan.running || !setup.data || watchlist.length === 0;
+  $("check").textContent = scan.running ? "Checking…" : "Check entries";
+  $("email").disabled = !setup.email;
+  if (!setup.email) $("email").checked = false;
+  $("email-label").textContent = setup.email ? "Email me new entries (" + setup.email_to + ")" : "Email me new entries";
+  $("auto").checked = auto.enabled;
+  $("auto").disabled = !setup.data;
+  $("auto-label").textContent = "Check automatically every " + auto.interval + " min while the market is open";
+  $("test-email-wrap").style.display = setup.email ? "" : "none";
+
+  const done = scan.results.length;
+  $("bar").className = "bar" + (scan.running ? " on" : "");
+  $("bar").firstElementChild.style.width = scan.total ? (100 * done / scan.total) + "%" : "0";
+  const hits = scan.results.filter((r) => r.signals.length);
+  let status = "";
+  if (scan.running) {
+    status = scan.message || ("Checking " + (scan.current || "…") + " (" + Math.min(done + 1, scan.total) + " of " + scan.total + ")");
+  } else if (scan.finished) {
+    status = "Checked at " + scan.finished + ": " + (hits.length ? plural(hits.length, "stock") + " with a possible entry" : "no entries right now") + ". " + (scan.email || "");
+  } else if (watchlist.length === 0) {
+    status = "Add a ticker to your watchlist to get started.";
+  } else {
+    status = "Press the button to check your " + plural(watchlist.length, "stock") + ".";
+  }
+  $("status").textContent = status;
+
+  // Entries
+  const entries = $("entries");
+  entries.replaceChildren();
+  if (hits.length) {
+    entries.append(el("h2", {text: "Possible entries"}));
+    for (const row of hits) entries.append(entryCard(row));
+  }
+
+  // Watchlist table
+  const byName = Object.fromEntries(scan.results.map((r) => [r.symbol, r]));
+  const wrap = $("watchlist");
+  if (watchlist.length === 0) {
+    wrap.replaceChildren(el("div", {class: "empty", text: "Your watchlist is empty."}));
+    return;
+  }
+  const table = el("table", {},
+    el("thead", {}, el("tr", {},
+      el("th", {text: "Stock"}), el("th", {class: "num", text: "Price"}), el("th", {class: "num", text: "Today"}),
+      el("th", {class: "num", text: "RSI"}), el("th", {text: "Result"}), el("th", {}))));
+  const body = el("tbody");
+  for (const symbol of watchlist) {
+    const row = byName[symbol];
+    let result = scan.running && scan.current === symbol ? "Checking…" : "Not checked yet";
+    let resultClass = "status-cell";
+    if (row) {
+      if (row.error) { result = row.error; resultClass += " bad"; }
+      else if (row.signals.length) { result = row.signals.map((s) => s.title).join(", "); resultClass += " hit"; }
+      else if (row.note) result = "Skipped: " + row.note;
+      else result = "No entry";
+    }
+    const change = row && row.change_pct != null ? row.change_pct : null;
+    const remove = el("button", {class: "remove", title: "Remove " + symbol, "aria-label": "Remove " + symbol, text: "×"});
+    remove.addEventListener("click", async () => { await post("/api/watchlist/remove", {symbol}); refresh(); });
+    body.append(el("tr", {},
+      el("td", {class: "sym-cell", text: symbol}),
+      el("td", {class: "num", text: row ? money(row.price) : ""}),
+      el("td", {class: "num " + (change == null ? "" : change >= 0 ? "up" : "down"), text: percent(change)}),
+      el("td", {class: "num", text: row && row.facts["RSI(14)"] || ""}),
+      el("td", {class: resultClass, text: result}),
+      el("td", {}, remove)));
+  }
+  table.append(body);
+  wrap.replaceChildren(table);
+}
+
+function banner(before, code, after) {
+  return el("div", {class: "banner"}, document.createTextNode(before), el("code", {text: code}), document.createTextNode(after));
+}
+
+function plural(count, word) { return count + " " + word + (count === 1 ? "" : "s"); }
+
+function entryCard(row) {
+  const card = el("section", {class: "card entry"});
+  const change = row.change_pct;
+  card.append(el("div", {class: "entry-head"},
+    el("span", {class: "sym", text: row.symbol}),
+    el("span", {class: "price", text: money(row.price)}),
+    el("span", {class: "price " + (change >= 0 ? "up" : "down"), text: percent(change)}),
+    el("span", {class: "small", text: "candle of " + row.date})));
+  if (row.plan) {
+    const levels = el("div", {class: "levels"});
+    for (const level of row.plan.levels) {
+      const kind = level.label === "SL" ? " sl" : level.label.startsWith("TP") ? " tp" : "";
+      levels.append(el("div", {class: "level" + kind},
+        el("div", {class: "label", text: level.label}),
+        el("div", {class: "value", text: level.price}),
+        el("div", {class: "small", text: level.pct || " "})));
+    }
+    card.append(levels, el("div", {class: "small", text: row.plan.note}));
+  }
+  for (const signal of row.signals) {
+    card.append(el("div", {class: "signal"},
+      el("div", {class: "title"}, document.createTextNode(signal.title),
+        el("span", {class: "badge" + (signal.new ? " new" : ""), text: signal.new ? "new" : "already emailed"})),
+      el("div", {text: signal.reason})));
+  }
+  const facts = el("div", {class: "facts"});
+  for (const [label, value] of Object.entries(row.facts)) {
+    facts.append(el("span", {}, document.createTextNode(label + " "), el("b", {text: value})));
+  }
+  card.append(facts, el("div", {class: "signal"},
+    el("a", {href: "https://finance.yahoo.com/chart/" + encodeURIComponent(row.symbol), target: "_blank", rel: "noopener", text: "Open chart"})));
+  return card;
+}
+
+// Remember the email choice in this browser; default to on.
+function loadEmailChoice() {
+  try { return localStorage.getItem("trader-email") !== "off"; } catch (error) { return true; }
+}
+$("email").checked = loadEmailChoice();
+$("email").addEventListener("change", () => {
+  try { localStorage.setItem("trader-email", $("email").checked ? "on" : "off"); } catch (error) {}
+});
+
+$("check").addEventListener("click", async () => {
+  $("check").disabled = true;
+  await post("/api/check", {email: $("email").checked});
+  refresh();
+});
+$("auto").addEventListener("change", async () => {
+  await post("/api/auto", {enabled: $("auto").checked});
+  refresh();
+});
+$("add-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const symbol = $("add-input").value.trim();
+  if (!symbol) return;
+  const result = await post("/api/watchlist/add", {symbol});
+  $("add-error").textContent = result.error || "";
+  if (!result.error) $("add-input").value = "";
+  refresh();
+});
+$("test-email").addEventListener("click", async () => {
+  $("test-email-result").textContent = "Sending…";
+  $("test-email-result").textContent = (await post("/api/test-email")).message;
+});
+
+refresh();
+</script>
+</body>
+</html>

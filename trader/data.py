@@ -50,7 +50,8 @@ def api_key() -> str:
     return key
 
 
-def fetch_history(symbol: str, retries: int = 3) -> History:
+def fetch_history(symbol: str, retries: int = 3, notify=print) -> History:
+    """Download daily candles. `notify` is told when a rate-limit wait starts."""
     query = urllib.parse.urlencode(
         {"symbol": symbol, "interval": "1day", "outputsize": BARS, "order": "asc"}
     )
@@ -81,7 +82,7 @@ def fetch_history(symbol: str, retries: int = 3) -> History:
         if code == 429 and "minute" in message and attempt < retries - 1:
             # The free plan allows a few requests per minute; wait for the next one.
             wait = 61 - datetime.now().second
-            print(f"  (Twelve Data's per-minute limit reached, waiting {wait}s)")
+            notify(f"Twelve Data's per-minute limit reached, waiting {wait}s")
             time.sleep(wait)
             continue
         raise DataError(f"{symbol}: {message}")

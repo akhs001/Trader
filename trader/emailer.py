@@ -73,7 +73,7 @@ def _by_stock(signals: list[Signal]) -> list[list[Signal]]:
     return list(groups.values())
 
 
-def _plan_rows(signal: Signal) -> list[tuple[str, str, str]]:
+def plan_rows(signal: Signal) -> list[tuple[str, str, str]]:
     """(label, price, distance from entry) for each level of the trade plan."""
     plan = signal.plan
     if plan is None:
@@ -87,7 +87,7 @@ def _plan_rows(signal: Signal) -> list[tuple[str, str, str]]:
     return rows
 
 
-def _plan_note(signal: Signal, several_signals: bool) -> str:
+def plan_note(signal: Signal, several_signals: bool) -> str:
     plan = signal.plan
     ratios = " and ".join(f"{(t - plan.entry) / plan.risk:g}x" for t in plan.targets)
     note = f"SL is {plan.stop_basis}. TP is {ratios} the risk of {plan.risk:.2f} per share."
@@ -106,9 +106,9 @@ def _plain_text(signals: list[Signal]) -> str:
         if s.plan:
             levels = "   ".join(
                 f"{label}: {price}" + (f" ({pct})" if pct else "")
-                for label, price, pct in _plan_rows(s)
+                for label, price, pct in plan_rows(s)
             )
-            plan = f"  {levels}\n  {_plan_note(s, len(group) > 1)}\n"
+            plan = f"  {levels}\n  {plan_note(s, len(group) > 1)}\n"
         blocks.append(
             f"{_heading(s)}\n"
             f"  Price: {s.price:.2f} ({s.change_pct:+.2f}% today, {s.date})\n"
@@ -143,13 +143,13 @@ def _html(signals: list[Signal]) -> str:
                 f'<div style="font-size:11px;font-weight:700;letter-spacing:.04em;color:#5f6368">{label}</div>'
                 f'<div style="font-size:16px;font-weight:700;color:{colors.get(label, "#137333")}">{price}</div>'
                 f'<div style="font-size:11px;color:#5f6368">{pct or "&nbsp;"}</div></td>'
-                for label, price, pct in _plan_rows(s)
+                for label, price, pct in plan_rows(s)
             )
             plan = (
                 f'<table cellpadding="0" cellspacing="0" width="100%" style="border-collapse:collapse;'
                 f'background:#f1f3f4;border-radius:6px;margin:12px 0 0"><tr>{cells}</tr></table>'
                 f'<div style="font-size:12px;line-height:1.5;color:#5f6368;margin:6px 0 0">'
-                f'{escape(_plan_note(s, len(group) > 1))}</div>'
+                f'{escape(plan_note(s, len(group) > 1))}</div>'
             )
         cards.append(f"""
 <div style="border:1px solid #dadce0;border-radius:8px;padding:16px;margin:0 0 14px">

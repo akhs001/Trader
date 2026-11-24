@@ -1,4 +1,6 @@
-"""Scan the watchlist and email any new entry signals.
+"""Scan the watchlist and email any new entry signals, from the console.
+
+The app with buttons is `python -m trader.app`.
 
 Usage:
     python -m trader.main --loop        keep running; scan during market hours
@@ -19,8 +21,8 @@ from datetime import datetime
 from pathlib import Path
 
 from . import emailer, market
-from .data import ApiKeyError, DataError, api_key, fetch_history
-from .signals import MIN_BARS, Signal, scan
+from .data import ApiKeyError, api_key
+from .scanner import StockResult, check_watchlist, email_signals, load_watchlist, new_signals
 from .state import AlertState
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -43,15 +45,6 @@ def load_env_file(path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 
 
-def load_watchlist(path: Path) -> list[str]:
-    symbols = []
-    for line in path.read_text().splitlines():
-        symbol = line.split("#", 1)[0].strip().upper()
-        if symbol and symbol not in symbols:
-            symbols.append(symbol)
-    return symbols
-
-
 def scan_once(args: argparse.Namespace) -> int:
     """Scan every stock once. Returns 0 on success, 1 if no prices could be read."""
     # Read on every scan, so edits take effect without restarting the bot.
@@ -61,39 +54,30 @@ def scan_once(args: argparse.Namespace) -> int:
         print(f"The watchlist {args.watchlist} is empty; nothing to scan.")
         return 0
 
-    signals: list[Signal] = []
-    failed: list[str] = []
-    for symbol in symbols:
-        try:
-            history = fetch_history(symbol)
-        except DataError as error:
-            print(f"  ! {error}")
-            failed.append(symbol)
-            continue
-        found = scan(history, config)
-        signals.extend(found)
-        note = ", ".join(s.title for s in found) if found else "no entry"
-        if len(history.closes) < MIN_BARS:
-            note = f"skipped, only {len(history.closes)} days of history"
-        print(f"  {symbol:<6} {history.closes[-1]:>10.2f}  {history.dates[-1]}  {note}")
-        time.sleep(0.3)  # stay polite to the data provider
+    def show(result: StockResult) -> None:
+        if result.error:
+            print(f"  ! {result.symbol}: {result.error}")
+            return
+        note = ", ".join(s.title for s in result.signals) or "no entry"
+        if result.note:
+            note = f"skipped, {result.note}"
+        print(f"  {result.symbol:<6} {result.price:>10.2f}  {result.date}  {note}")
 
+    results = check_watchlist(symbols, config, on_result=show,
+                              notify=lambda text: print(f"  ({text})"))
     state = AlertState(args.state)
-    cooldown = int(config.get("alerts", {}).get("cooldown_days", 5))
-    fresh = [s for s in signals if state.is_new(s, cooldown)]
-    print(f"{len(signals)} signal(s) firing, {len(fresh)} not yet emailed.")
+    fresh = new_signals(results, state, config)
+    firing = sum(len(r.signals) for r in results)
+    print(f"{firing} signal(s) firing, {len(fresh)} not yet emailed.")
 
     if fresh and args.dry_run:
         print("Dry run, not sending. The email would say:\n")
         print(emailer.build_message(fresh, "you", "you").get_body(("plain",)).get_content())
     elif fresh:
-        sender, password, recipient = emailer.credentials()
-        emailer.send(emailer.build_message(fresh, sender, recipient), sender, password)
+        recipient = email_signals(fresh, state)
         print(f"Emailed {len(fresh)} alert(s) to {recipient}.")
-        # Recorded only after a successful send, so a failed send is retried.
-        state.record(fresh)
-        state.save()
 
+    failed = [r.symbol for r in results if r.error]
     if failed:
         print(f"Could not get prices for: {', '.join(failed)}")
         # Fail only if nothing worked, so one bad ticker does not hide the

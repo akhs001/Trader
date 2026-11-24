@@ -118,6 +118,13 @@ def _plan(ctx: "_Context", stop_level: float | None, stop_name: str, settings: d
     )
 
 
+def facts(history: History) -> dict[str, str]:
+    """Indicator readings for a stock, whether or not a signal is firing."""
+    if len(history.closes) < 2:
+        return {}
+    return _Context(history).facts()
+
+
 class _Context:
     def __init__(self, history: History):
         self.h = history
