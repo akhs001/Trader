@@ -21,6 +21,7 @@ MIN_BARS = 60  # below this there is too little history for anything useful
 
 # The strategies a user can pick. Each has a long and a short form.
 STRATEGIES = {
+    "trend_continuation": "Trend continuation",
     "trend_pullback": "Trend pullback",
     "breakout": "Breakout",
     "rsi_reversal": "RSI reversal",
@@ -114,6 +115,7 @@ class Analysis:
                 continue
             view = market.view(end)
             for name, detector in (
+                ("trend_continuation", _trend_continuation),
                 ("trend_pullback", _trend_pullback),
                 ("breakout", _breakout),
                 ("oversold_bounce", _oversold_bounce),
@@ -283,6 +285,67 @@ def _plan(view: _View, found: _Found, settings: dict) -> Plan | None:
         targets=[view.price(entry + float(r) * distance) for r in multiples],
         stop_basis=basis,
     )
+
+
+def _trend_continuation(view: _View, settings: dict) -> list[_Found]:
+    """A big move, a partial retrace of it, and the first day the move resumes.
+
+    Long: a strong run up, a dip that gives back part of it, then a turn up.
+    Short: a strong drop, a bounce that recovers part of it, then a turn down.
+    """
+    leg_days = int(settings.get("leg_days", 60))
+    min_leg_atr = float(settings.get("min_leg_atr", 10))
+    min_retrace = float(settings.get("min_retrace_pct", 30)) / 100
+    max_retrace = float(settings.get("max_retrace_pct", 65)) / 100
+    lookback = int(settings.get("lookback_days", 5))
+
+    count = len(view.close)
+    atr = view.atr[-1]
+    if count < leg_days + 3 or view.sma200[-1] is None or not atr:
+        return []
+    # The move resumes: the first close beyond the previous day's extreme.
+    if view.close[-1] <= view.high[-2] or view.close[-2] > view.high[-3]:
+        return []
+    # An established trend: the averages are stacked in its direction.
+    if not view.sma20[-1] > view.sma50[-1] > view.sma200[-1]:
+        return []
+
+    # The big move ("leg"): from its start to its top, inside the window.
+    first = count - 1 - leg_days
+    top_at = max(range(first, count - 1), key=lambda i: view.high[i])
+    if top_at == first or top_at > count - 3:
+        return []  # no start before the top, or no room for a retrace after it
+    start_at = min(range(first, top_at), key=lambda i: view.low[i])
+    top, start = view.high[top_at], view.low[start_at]
+    leg = top - start
+    if leg < min_leg_atr * atr:
+        return []
+
+    # The retrace: how much of the leg was given back, and how recently.
+    dip_at = min(range(top_at + 1, count), key=lambda i: view.low[i])
+    dip = view.low[dip_at]
+    retrace = (top - dip) / leg
+    if dip_at < count - 1 - lookback or not min_retrace <= retrace <= max_retrace:
+        return []
+
+    move_pct = abs(view.price(top) / view.price(start) - 1) * 100
+    days = top_at - start_at
+    trigger = view.price(view.high[-2])
+    if view.short:
+        return [_Found(
+            "trend_continuation", "trend_continuation_down", "Downtrend continuation",
+            f"Strong downtrend (down {move_pct:.0f}% in {days} days, 20-day average below the "
+            f"50-day below the 200-day) bounced {retrace:.0%} of the drop to "
+            f"{view.price(dip):.2f} and is now trading below yesterday's low of {trigger:.2f}.",
+            dip, "the bounce high",
+        )]
+    return [_Found(
+        "trend_continuation", "trend_continuation", "Uptrend continuation",
+        f"Strong uptrend (up {move_pct:.0f}% in {days} days, 20-day average above the "
+        f"50-day above the 200-day) retraced {retrace:.0%} of the rise to "
+        f"{view.price(dip):.2f} and is now trading above yesterday's high of {trigger:.2f}.",
+        dip, "the retrace low",
+    )]
 
 
 def _trend_pullback(view: _View, settings: dict) -> list[_Found]:

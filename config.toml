@@ -52,6 +52,21 @@ targets_r = [2.0, 3.0]
 long = true
 short = true
 
+[signals.trend_continuation]
+enabled = true
+# A massive move, a partial retrace of it, and the first day it resumes.
+# The move ("leg") is measured inside the last `leg_days` days and must be at
+# least `min_leg_atr` ATRs from its start to its top, with the 20-day average
+# above the 50-day above the 200-day. Lower `min_leg_atr` for more signals.
+# The retrace must give back between `min_retrace_pct` and `max_retrace_pct`
+# of the leg, and its low must be within the last `lookback_days` days.
+# Entry = the first day the price moves above the previous day's high.
+leg_days = 60
+min_leg_atr = 10
+min_retrace_pct = 30
+max_retrace_pct = 65
+lookback_days = 5
+
 [signals.trend_pullback]
 enabled = true
 # Uptrend = price above the 200-day average and 50-day above 200-day.

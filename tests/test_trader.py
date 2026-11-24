@@ -258,15 +258,57 @@ def mirrored(history):
     )
 
 
+def continuation_setup(retrace=20.0):
+    """A slow climb, a strong 40-point run, a retrace of part of it, then a turn up."""
+    closes = [100 + i * 0.05 for i in range(230)]
+    base = closes[-1]
+    closes += [base + 2 * i for i in range(1, 21)]            # the run: +40 in 20 days
+    top = closes[-1]
+    closes += [top - retrace * i / 4 for i in range(1, 5)]    # the retrace, over 4 days
+    closes.append(closes[-1] + 4)                             # the turn
+    return make_history(closes, highs=[c + 0.5 for c in closes], lows=[c - 0.5 for c in closes])
+
+
+class ContinuationTests(unittest.TestCase):
+    def find(self, history):
+        return next((s for s in scan(history, CONFIG) if s.kind == "trend_continuation"), None)
+
+    def test_fires_after_a_strong_run_and_a_partial_retrace(self):
+        signal = self.find(continuation_setup())
+        self.assertIsNotNone(signal)
+        self.assertEqual((signal.strategy, signal.direction, signal.title),
+                         ("trend_continuation", "long", "Uptrend continuation"))
+        self.assertRegex(signal.reason, r"Strong uptrend \(up \d+% in \d+ days")
+        self.assertRegex(signal.reason, r"retraced (49|50)% of the rise to 130\.95")
+        self.assertIn("the retrace low", signal.plan.stop_basis)
+        self.assertLess(signal.plan.stop, signal.plan.entry)
+
+    def test_needs_a_real_retrace_but_not_a_collapse(self):
+        self.assertIsNone(self.find(continuation_setup(retrace=6)))    # barely dipped
+        self.assertIsNone(self.find(continuation_setup(retrace=34)))   # gave back most of the run
+
+    def test_needs_a_big_move(self):
+        strict = {"signals": {**CONFIG["signals"], "trend_continuation": {"min_leg_atr": 60}}}
+        self.assertEqual([s for s in scan(continuation_setup(), strict) if s.strategy == "trend_continuation"], [])
+
+    def test_short_version(self):
+        signal = next(s for s in scan(mirrored(continuation_setup()), CONFIG) if s.kind == "trend_continuation_down")
+        self.assertEqual((signal.direction, signal.title), ("short", "Downtrend continuation"))
+        self.assertRegex(signal.reason, r"bounced (49|50)% of the drop")
+        self.assertGreater(signal.plan.stop, signal.plan.entry)
+
+
 class ShortTests(unittest.TestCase):
     """Short signals are the long ones upside down."""
 
-    PAIRS = {"trend_pullback": "trend_rally", "breakout": "breakdown",
+    PAIRS = {"trend_continuation": "trend_continuation_down",
+             "trend_pullback": "trend_rally", "breakout": "breakdown",
              "oversold_bounce": "overbought_drop", "ma_cross": "ma_cross_down",
              "macd_cross": "macd_cross_down"}
 
     def long_setups(self):
         yield make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
+        yield continuation_setup()
         closes = [100 + i * 0.5 for i in range(250)]
         peak = closes[-1]
         closes += [peak - 3, peak - 6, peak - 8, peak - 9, peak - 6]
@@ -343,13 +385,13 @@ class BacktestTests(unittest.TestCase):
         if short:
             history, top = mirrored(history), 2 * max(history.highs)
         options = backtest.Options(strategy="breakout", direction="short" if short else "long",
-                                   years=0.1, target=1, max_days=3)
+                                   years=0.1, target=1, hold=3)
         trades = backtest.backtest_stock(history, CONFIG, options)
         return plan, trades[0]
 
     def test_target_hit(self):
         plan, trade = self.setup_then([(103, 104, 102.5, 103.5), (104, 110, 103.5, 109)])
-        self.assertEqual((trade.reason, trade.days), ("target", 2))
+        self.assertEqual((trade.reason, trade.held), ("target", 2))
         self.assertAlmostEqual(trade.exit, plan.targets[0])
         self.assertAlmostEqual(trade.r, 2.0)
 
@@ -376,13 +418,13 @@ class BacktestTests(unittest.TestCase):
 
     def test_time_limit(self):
         _, trade = self.setup_then([(103, 104, 102, 103.5)] * 5)
-        self.assertEqual((trade.reason, trade.days, trade.exit), ("time", 3, 103.5))
+        self.assertEqual((trade.reason, trade.held, trade.exit), ("time", 3, 103.5))
 
     def test_trade_still_open_at_the_end(self):
         from trader import backtest
         _, trade = self.setup_then([(103, 104, 102, 103.5)])
         self.assertEqual(trade.reason, "open")
-        self.assertEqual(backtest.summarize([trade]), {"trades": 0, "open": 1})
+        self.assertEqual(backtest.summarize([trade]), {"trades": 0, "open": 1, "profit": 0.0})
 
     def test_short_trade_is_the_long_trade_upside_down(self):
         _, long_trade = self.setup_then([(103, 104, 102.5, 103.5), (104, 110, 103.5, 109)])
@@ -415,6 +457,61 @@ class BacktestTests(unittest.TestCase):
             self.assertEqual(live, past)
             compared += len(live)
         self.assertGreater(compared, 20)
+
+    def test_budget_follows_the_trades(self):
+        from trader import backtest
+        def trade(entry_day, exit_day, r, stop=95.0):
+            won = r > 0
+            return backtest.Trade("T", "breakout", "Breakout", "long", f"2025-01-{entry_day:02d}", 100, stop, 110,
+                                  f"2025-01-{exit_day:02d}", 100 + (100 - stop) * r, "target" if won else "stop",
+                                  r, (100 - stop) * r, exit_day - entry_day)
+        # 1% risk of 10,000 = 100 per trade; the SL is 5 away, so 20 shares.
+        first, second, third = trade(1, 5, 2), trade(2, 6, -1), trade(7, 9, -1)
+        backtest.apply_budget([first, second, third], 10_000, 1)
+        self.assertAlmostEqual(first.shares, 20)
+        self.assertAlmostEqual(first.pnl, 200)
+        # The second trade starts before the first ends, so it is sized on 10,000 too.
+        self.assertAlmostEqual(second.pnl, -100)
+        # The third starts after both: budget 10,100, so it risks 101.
+        self.assertAlmostEqual(third.pnl, -101)
+        stats = backtest.summarize([first, second, third], 10_000)
+        self.assertAlmostEqual(stats["end_budget"], 9_999)
+        self.assertAlmostEqual(stats["return_pct"], -0.01)
+        self.assertAlmostEqual(stats["max_drawdown_pct"], 201 / 10_200 * 100)
+
+    def test_position_is_never_larger_than_the_budget(self):
+        from trader import backtest
+        tight = backtest.Trade("T", "breakout", "Breakout", "long", "2025-01-01", 100, 99.9, 101,
+                               "2025-01-02", 99.9, "stop", -1, -0.1, 1)
+        backtest.apply_budget([tight], 10_000, 1)
+        # Risking 100 with the SL only 0.10 away would need 1,000 shares = 100,000.
+        self.assertAlmostEqual(tight.shares, 100)
+        self.assertAlmostEqual(tight.pnl, -10)
+
+    def test_hours_are_followed_on_hourly_candles(self):
+        from trader import backtest
+        closes = [100.0] * 259 + [103.0]
+        history = make_history(closes, volumes=[1_000_000.0] * 259 + [2_000_000.0])
+        history.dates.append("2024-09-17"); history.opens.append(103); history.highs.append(111)
+        history.lows.append(102); history.closes.append(110); history.volumes.append(1_000_000.0)
+        signal_day = history.dates[-2]
+        # Hourly prices are twice the daily ones (as if not adjusted): 206 is the entry of 103.
+        stamps = [f"{signal_day} 15:30", "2024-09-17 09:30", "2024-09-17 10:30", "2024-09-17 11:30"]
+        hourly = History("TEST", "TEST", stamps, opens=[205, 206, 208, 209], highs=[206, 209, 210, 223],
+                         lows=[204, 205, 207, 208], closes=[206, 208, 209, 222], volumes=[1.0] * 4)
+        def run(hold):
+            options = backtest.Options(strategy="breakout", direction="long", years=0.1, hold=hold, hold_unit="hours")
+            return backtest.backtest_stock(history, CONFIG, options, hourly)[0]
+        two_hours = run(2)
+        self.assertEqual((two_hours.reason, two_hours.held, two_hours.exit_date), ("time", 2, "2024-09-17 10:30"))
+        self.assertAlmostEqual(two_hours.exit, 104.5)  # 209 at the hourly scale
+        longer = run(20)
+        self.assertEqual((longer.reason, longer.held), ("target", 3))
+        self.assertAlmostEqual(longer.r, 2.0)
+        # Days before the hourly candles begin are not tested.
+        late = History("TEST", "TEST", stamps[1:], [206, 208, 209], [209, 210, 223], [205, 207, 208], [208, 209, 222], [1.0] * 3)
+        options = backtest.Options(strategy="breakout", direction="long", years=0.1, hold=2, hold_unit="hours")
+        self.assertEqual(backtest.backtest_stock(history, CONFIG, options, late), [])
 
     def test_summary_numbers(self):
         from trader import backtest
@@ -802,7 +899,10 @@ class AppTests(unittest.TestCase):
 
         self.assertIsNone(self.call("/api/backtest")[1]["result"])
         with mock.patch.object(app_module, "fetch_history", history_for):
-            self.assertEqual(self.call("/api/backtest", {"strategy": "macd_cross", "years": 1, "target": 2})[1]["error"], "")
+            self.assertIn("ticker", self.call("/api/backtest", {"symbol": ""})[1]["error"])
+            body = {"symbol": "aaa", "strategy": "macd_cross", "years": 1, "target": 2,
+                    "hold": 5, "hold_unit": "days", "budget": 2000, "risk_pct": 2}
+            self.assertEqual(self.call("/api/backtest", body)[1]["error"], "")
             for _ in range(2000):
                 status = self.call("/api/state")[1]["backtest"]
                 if not status["running"]:
@@ -811,10 +911,21 @@ class AppTests(unittest.TestCase):
         result = self.call("/api/backtest")[1]["result"]
         self.assertEqual(result["options"]["strategy"], "macd_cross")
         self.assertEqual(result["options"]["target"], 2)
-        self.assertEqual(result["skipped"], ["BBB: symbol not found"])
+        self.assertEqual((result["symbol"], result["options"]["hold"], result["options"]["budget"]), ("AAA", 5, 2000))
         self.assertTrue(result["trades"])
         self.assertEqual({t["strategy"] for t in result["trades"]}, {"macd_cross"})
-        self.assertEqual({t["symbol"] for t in result["trades"]}, {"AAA"})
+        self.assertEqual(result["total"]["start_budget"], 2000)
+        profit = sum(t["pnl"] for t in result["trades"] if t["pnl"] is not None)
+        self.assertAlmostEqual(result["total"]["end_budget"], 2000 + profit)
+
+        # A ticker without prices reports the problem instead of a result.
+        with mock.patch.object(app_module, "fetch_history", history_for):
+            self.call("/api/backtest", {"symbol": "BBB"})
+            for _ in range(2000):
+                status = self.call("/api/state")[1]["backtest"]
+                if not status["running"]:
+                    break
+        self.assertEqual(status["error"], "BBB: symbol not found")
 
     def test_page_is_told_when_the_program_was_updated(self):
         from unittest import mock

@@ -80,27 +80,39 @@ def _yfinance():
     return yfinance
 
 
-def fetch_yahoo(symbol: str, period: str = "2y") -> History:
+def fetch_hourly(symbol: str, source: str = DEFAULT_SOURCE, notify=print) -> History:
+    """Download hourly candles, as far back as the source has them (about 2 years).
+
+    The `dates` of the result are "YYYY-MM-DD HH:MM" in the exchange's time.
+    """
+    if source == "twelvedata":
+        return fetch_twelve_data(symbol, notify=notify, bars=5000, interval="1h")
+    check_setup(source)
+    return fetch_yahoo(symbol, period="730d", interval="1h")
+
+
+def fetch_yahoo(symbol: str, period: str = "2y", interval: str = "1d") -> History:
     yfinance = _yfinance()
     # yfinance reports problems through its logger; keep the console clean and
     # turn an empty result into our own error instead.
     logging.getLogger("yfinance").setLevel(logging.CRITICAL)
     try:
-        frame = yfinance.Ticker(symbol).history(period=period, interval="1d", auto_adjust=True)
+        frame = yfinance.Ticker(symbol).history(period=period, interval=interval, auto_adjust=True)
     except Exception as error:  # yfinance raises many different error types
         raise DataError(f"{symbol}: could not download prices ({error})") from error
-    return history_from_frame(symbol, frame)
+    return history_from_frame(symbol, frame, hourly=interval != "1d")
 
 
-def history_from_frame(symbol: str, frame) -> History:
-    """Convert a yfinance price table (one row per day) into a History."""
+def history_from_frame(symbol: str, frame, hourly: bool = False) -> History:
+    """Convert a yfinance price table (one row per candle) into a History."""
     history = History(
         symbol=symbol, name=symbol,
         dates=[], opens=[], highs=[], lows=[], closes=[], volumes=[],
     )
     if frame is not None and len(frame):
         frame = frame.dropna(subset=["Open", "High", "Low", "Close"])
-        history.dates = [stamp.date().isoformat() for stamp in frame.index]
+        style = "%Y-%m-%d %H:%M" if hourly else "%Y-%m-%d"
+        history.dates = [stamp.strftime(style) for stamp in frame.index]
         history.opens = [float(v) for v in frame["Open"]]
         history.highs = [float(v) for v in frame["High"]]
         history.lows = [float(v) for v in frame["Low"]]
@@ -140,9 +152,10 @@ def api_key() -> str:
     return key
 
 
-def fetch_twelve_data(symbol: str, retries: int = 3, notify=print, bars: int = 0) -> History:
+def fetch_twelve_data(symbol: str, retries: int = 3, notify=print, bars: int = 0,
+                      interval: str = "1day") -> History:
     query = urllib.parse.urlencode(
-        {"symbol": symbol, "interval": "1day", "outputsize": max(bars, BARS), "order": "asc"}
+        {"symbol": symbol, "interval": interval, "outputsize": max(bars, BARS), "order": "asc"}
     )
     request = urllib.request.Request(
         f"{API_URL}?{query}", headers={"Authorization": f"apikey {api_key()}"}
@@ -164,7 +177,7 @@ def fetch_twelve_data(symbol: str, retries: int = 3, notify=print, bars: int = 0
             continue
 
         if payload.get("status") != "error":
-            return parse_time_series(symbol, payload)
+            return parse_time_series(symbol, payload, hourly=interval != "1day")
         code, message = payload.get("code"), str(payload.get("message", "unknown error"))
         if code == 401:
             raise ApiKeyError(f"Twelve Data rejected the API key: {message}")
@@ -178,7 +191,7 @@ def fetch_twelve_data(symbol: str, retries: int = 3, notify=print, bars: int = 0
     raise DataError(f"{symbol}: could not download prices ({last_error})")
 
 
-def parse_time_series(symbol: str, payload: dict) -> History:
+def parse_time_series(symbol: str, payload: dict, hourly: bool = False) -> History:
     values = payload.get("values") or []
     history = History(
         symbol=symbol, name=symbol,
@@ -189,7 +202,7 @@ def parse_time_series(symbol: str, payload: dict) -> History:
             candle = [float(row[field]) for field in ("open", "high", "low", "close")]
         except (KeyError, TypeError, ValueError):
             continue  # skip an incomplete candle
-        history.dates.append(str(row["datetime"])[:10])
+        history.dates.append(str(row["datetime"])[:16 if hourly else 10])
         history.opens.append(candle[0])
         history.highs.append(candle[1])
         history.lows.append(candle[2])

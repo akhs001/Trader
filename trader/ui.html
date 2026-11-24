@@ -48,6 +48,7 @@
   .tile { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
   .tile .label { font-size: 12px; color: var(--muted); }
   table.compact th, table.compact td { font-size: 13px; padding-right: 12px; }
+  .tile .value.up { color: var(--up); } .tile .value.down { color: var(--down); }
   .tile .value { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .chart { position: relative; }
   .chart svg { display: block; width: 100%; height: 240px; }
@@ -120,6 +121,10 @@
   .remove { border: 0; background: none; color: var(--muted); font-size: 18px; line-height: 1; padding: 2px 6px; }
   .remove:hover { color: var(--down); }
   form.add { display: flex; gap: 8px; margin-top: 14px; }
+  input[type=number] { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line);
+                       border-radius: 6px; padding: 5px 8px; width: 110px; }
+  #bt-risk { width: 70px; }
+  .filters input[type=text] { width: 110px; padding: 5px 8px; border-radius: 6px; }
   input[type=text] { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line);
                      border-radius: 8px; padding: 7px 10px; width: 150px; text-transform: uppercase; }
   input::placeholder { text-transform: none; }
@@ -193,7 +198,10 @@
             <option value="short">Short only</option>
           </select>
         </label>
-        <label>Stocks <select id="bt-symbol"></select></label>
+        <label>Ticker
+          <input type="text" id="bt-symbol" list="bt-symbols" maxlength="15" autocomplete="off" placeholder="NVDA">
+          <datalist id="bt-symbols"></datalist>
+        </label>
         <label>Period
           <select id="bt-years">
             <option value="1">Last year</option>
@@ -208,12 +216,31 @@
           </select>
         </label>
         <label>Close after
-          <select id="bt-days">
-            <option value="10">10 days</option>
-            <option value="20">20 days</option>
-            <option value="30" selected>30 days</option>
-            <option value="60">60 days</option>
+          <select id="bt-hold">
+            <optgroup label="Day trading">
+              <option value="1h">1 hour</option>
+              <option value="2h">2 hours</option>
+              <option value="4h">4 hours</option>
+              <option value="1d">1 day</option>
+            </optgroup>
+            <optgroup label="A few days">
+              <option value="2d">2 days</option>
+              <option value="3d">3 days</option>
+              <option value="5d">5 days</option>
+              <option value="10d">10 days</option>
+            </optgroup>
+            <optgroup label="Longer">
+              <option value="20d">20 days</option>
+              <option value="30d" selected>30 days</option>
+              <option value="60d">60 days</option>
+            </optgroup>
           </select>
+        </label>
+        <label>Start budget $
+          <input type="number" id="bt-budget" value="10000" min="1" step="100" inputmode="decimal">
+        </label>
+        <label>Risk per trade
+          <input type="number" id="bt-risk" value="1" min="0.1" max="100" step="0.25" inputmode="decimal"> %
         </label>
       </div>
       <div class="controls">
@@ -427,26 +454,43 @@ function showTab(name) {
 let backtestRun = null;     // the run whose result is on screen
 let backtestResult = null;
 let showAllTrades = false;
+let backtestFormError = "";  // a problem with what was typed, shown until the next run
 
 function signed(value, digits = 2) { return (value >= 0 ? "+" : "") + value.toFixed(digits); }
 
+function money0(value) {
+  return (value < 0 ? "-$" : "$") + Math.abs(value).toLocaleString("en-US", {maximumFractionDigits: 0});
+}
+function signedMoney(value) { return (value >= 0 ? "+" : "-") + "$" + Math.abs(value).toLocaleString("en-US", {maximumFractionDigits: 0}); }
+
+function holdChoice() {
+  const value = $("bt-hold").value;
+  return {hold: parseInt(value, 10), hold_unit: value.endsWith("h") ? "hours" : "days"};
+}
+
 function renderBacktestControls() {
   const run = state.backtest || {running: false, run: 0, total: 0, done: 0};
-  const symbols = $("bt-symbol");
-  const wanted = ["", ...state.watchlist].join(",");
-  if (symbols.dataset.list !== wanted) {
-    const current = symbols.value;
-    symbols.replaceChildren(el("option", {value: "", text: "Whole watchlist"}),
-      ...state.watchlist.map((symbol) => el("option", {value: symbol, text: symbol})));
-    symbols.dataset.list = wanted;
-    if (state.watchlist.includes(current)) symbols.value = current;
+  const list = $("bt-symbols");
+  const wanted = state.watchlist.join(",");
+  if (list.dataset.list !== wanted) {
+    list.replaceChildren(...state.watchlist.map((symbol) => el("option", {value: symbol})));
+    list.dataset.list = wanted;
   }
-  $("bt-run").disabled = run.running || !state.setup.data || state.watchlist.length === 0;
+  if (!$("bt-symbol").value && document.activeElement !== $("bt-symbol") && state.watchlist.length) {
+    $("bt-symbol").value = state.watchlist[0];
+  }
+  // Hourly prices only reach back about two years.
+  const hours = holdChoice().hold_unit === "hours";
+  $("bt-years").querySelector('option[value="5"]').disabled = hours;
+  if (hours && $("bt-years").value === "5") $("bt-years").value = "2";
+
+  $("bt-run").disabled = run.running || !state.setup.data;
   $("bt-run").textContent = run.running ? "Running…" : "Run backtest";
   $("bt-bar").className = "bar" + (run.running ? " on" : "");
-  $("bt-bar").firstElementChild.style.width = run.total ? (100 * run.done / run.total) + "%" : "0";
+  $("bt-bar").firstElementChild.style.width = run.running ? "60%" : "0";
   let status = "";
-  if (run.running) status = run.message || ("Testing " + (run.current || "…") + " (" + Math.min(run.done + 1, run.total) + " of " + run.total + ")");
+  if (run.running) status = run.message || ("Testing " + (run.current || "…"));
+  else if (backtestFormError) status = backtestFormError;
   else if (run.error) status = run.error;
   else if (!backtestResult) status = "Replays past prices day by day and trades every signal with its own SL and TP.";
   $("bt-status").textContent = status;
@@ -455,15 +499,26 @@ function renderBacktestControls() {
 
 async function loadBacktest(run) {
   backtestRun = run;
-  try {
-    backtestResult = (await (await fetch("/api/backtest")).json()).result;
-  } catch (error) { return; }
+  if (state.backtest.error) {
+    backtestResult = null;  // the run failed: do not leave an older result on screen
+  } else {
+    try {
+      backtestResult = (await (await fetch("/api/backtest")).json()).result;
+    } catch (error) { return; }
+  }
   showAllTrades = false;
+  if (backtestResult) $("bt-status").textContent = "";
   renderBacktest();
 }
 
-function tile(label, value) {
-  return el("div", {class: "tile"}, el("div", {class: "label", text: label}), el("div", {class: "value", text: value}));
+function tile(label, value, tone) {
+  return el("div", {class: "tile"}, el("div", {class: "label", text: label}),
+    el("div", {class: "value" + (tone ? " " + tone : ""), text: value}));
+}
+
+function holdLabel(options, count) {
+  const unit = options.hold_unit === "hours" ? "hour" : "day";
+  return count + " " + unit + (count === 1 ? "" : "s");
 }
 
 function renderBacktest() {
@@ -473,34 +528,38 @@ function renderBacktest() {
   if (!result) return;
   const total = result.total;
   const options = result.options;
-  const period = options.years === 1 ? "last year" : "last " + options.years + " years";
-  box.append(el("h2", {text: "Result: " + selectionLabel(options.strategy, options.direction) + ", " +
-    (result.symbols.length === 1 ? result.symbols[0] : plural(result.symbols.length, "stock")) + ", " + period}));
-  for (const problem of result.skipped) box.append(el("div", {class: "banner", text: "Skipped " + problem}));
+  const hours = options.hold_unit === "hours";
+  box.append(el("h2", {text: "Result: " + result.symbol + ", " + selectionLabel(options.strategy, options.direction) +
+    ", " + result.tested_from + " to " + result.tested_to}));
   if (!total.trades) {
     box.append(el("section", {class: "card"}, el("div", {class: "empty",
-      text: "No finished trades in this period." + (total.open ? " " + plural(total.open, "trade") + " still open." : "")})));
+      text: "No finished trades in this period." + (total.open ? " " + plural(total.open, "trade") + " still open." : "") +
+        (result.days_of_history < 260 ? " " + result.symbol + " has only " + result.days_of_history + " days of price history." : "")})));
     return;
   }
+  const tone = total.profit >= 0 ? "up" : "down";
+  box.append(el("div", {class: "tiles"},
+    tile("Start budget", money0(total.start_budget)),
+    tile("End budget", money0(total.end_budget), tone),
+    tile("Profit", signedMoney(total.profit) + " (" + signed(total.return_pct, 1) + "%)", tone),
+    tile("Largest drawdown", total.max_drawdown_pct >= 0.05 ? "-" + total.max_drawdown_pct.toFixed(1) + "%" : "0%")));
   box.append(el("div", {class: "tiles"},
     tile("Trades", String(total.trades)),
     tile("Win rate", total.win_rate.toFixed(0) + "%"),
     tile("Average per trade", signed(total.avg_r) + "R"),
-    tile("Total", signed(total.total_r, 1) + "R"),
-    tile("Profit factor", total.profit_factor == null ? "–" : total.profit_factor.toFixed(2)),
-    tile("Largest drawdown", "-" + total.max_drawdown_r.toFixed(1) + "R")));
+    tile("Profit factor", total.profit_factor == null ? "–" : total.profit_factor.toFixed(2))));
 
-  box.append(el("h2", {text: "Cumulative result"}));
+  box.append(el("h2", {text: "Budget over time"}));
   box.append(el("section", {class: "card"},
-    el("div", {class: "small", text: "Sum of all finished trades over time, in R. 1R is the amount risked on one trade (entry to SL)."}),
+    el("div", {class: "small", text: "Your budget after each finished trade, risking " + options.risk_pct + "% of it per trade. The darker line is the start budget."}),
     el("div", {class: "chart", id: "bt-chart"})));
 
   box.append(el("h2", {text: "By strategy"}));
   const byStrategy = el("table", {}, el("thead", {}, el("tr", {},
     el("th", {text: "Strategy"}), el("th", {text: "Side"}), el("th", {class: "num", text: "Trades"}),
     el("th", {class: "num", text: "Win rate"}), el("th", {class: "num", text: "Avg per trade"}),
-    el("th", {class: "num", text: "Total"}), el("th", {class: "num", text: "Profit factor"}),
-    el("th", {class: "num", text: "Avg days"}))));
+    el("th", {class: "num", text: "Profit factor"}), el("th", {class: "num", text: hours ? "Avg hours" : "Avg days"}),
+    el("th", {class: "num", text: "Profit"}))));
   const rows = el("tbody");
   for (const row of result.rows) {
     if (!row.trades) continue;
@@ -508,29 +567,30 @@ function renderBacktest() {
       el("td", {class: "sym-cell", text: row.name}), el("td", {text: row.direction === "short" ? "Short" : "Long"}),
       el("td", {class: "num", text: String(row.trades)}), el("td", {class: "num", text: row.win_rate.toFixed(0) + "%"}),
       el("td", {class: "num " + (row.avg_r >= 0 ? "up" : "down"), text: signed(row.avg_r) + "R"}),
-      el("td", {class: "num " + (row.total_r >= 0 ? "up" : "down"), text: signed(row.total_r, 1) + "R"}),
       el("td", {class: "num", text: row.profit_factor == null ? "–" : row.profit_factor.toFixed(2)}),
-      el("td", {class: "num", text: row.avg_days.toFixed(0)})));
+      el("td", {class: "num", text: row.avg_held.toFixed(0)}),
+      el("td", {class: "num " + (row.profit >= 0 ? "up" : "down"), text: signedMoney(row.profit)})));
   }
   byStrategy.append(rows);
   box.append(el("section", {class: "card"}, el("div", {class: "table-wrap"}, byStrategy)));
 
   box.append(el("h2", {text: "Trades"}));
   const trades = el("table", {class: "compact"}, el("thead", {}, el("tr", {},
-    el("th", {text: "Entered"}), el("th", {text: "Stock"}), el("th", {text: "Signal"}), el("th", {text: "Side"}),
+    el("th", {text: "Entered"}), el("th", {text: "Signal"}), el("th", {text: "Side"}),
     el("th", {class: "num", text: "Entry"}), el("th", {class: "num", text: "Exit"}), el("th", {text: "Ended by"}),
-    el("th", {class: "num", text: "Days"}), el("th", {class: "num", text: "Result"}), el("th", {class: "num", text: "Price move"}))));
+    el("th", {class: "num", text: hours ? "Hours" : "Days"}), el("th", {class: "num", text: "Result"}),
+    el("th", {class: "num", text: "Profit"}))));
   const tradeRows = el("tbody");
   const reasons = {target: "Take profit", stop: "Stop loss", time: "Time limit", open: "Still open"};
   const shown = showAllTrades ? result.trades : result.trades.slice(0, 50);
   for (const trade of shown) {
     tradeRows.append(el("tr", {},
-      el("td", {text: trade.entry_date}), el("td", {class: "sym-cell", text: trade.symbol}),
-      el("td", {text: trade.title}), el("td", {text: trade.direction === "short" ? "Short" : "Long"}),
+      el("td", {text: trade.entry_date}), el("td", {text: trade.title}),
+      el("td", {text: trade.direction === "short" ? "Short" : "Long"}),
       el("td", {class: "num", text: trade.entry.toFixed(2)}), el("td", {class: "num", text: trade.exit.toFixed(2)}),
-      el("td", {text: reasons[trade.reason]}), el("td", {class: "num", text: String(trade.days)}),
+      el("td", {text: reasons[trade.reason]}), el("td", {class: "num", text: String(trade.held)}),
       el("td", {class: "num " + (trade.r >= 0 ? "up" : "down"), text: signed(trade.r) + "R"}),
-      el("td", {class: "num", text: signed(trade.pct, 1) + "%"})));
+      el("td", {class: "num " + (trade.pnl == null ? "" : trade.pnl >= 0 ? "up" : "down"), text: trade.pnl == null ? "–" : signedMoney(trade.pnl)})));
   }
   trades.append(tradeRows);
   const tradesCard = el("section", {class: "card"}, el("div", {class: "table-wrap"}, trades));
@@ -540,9 +600,11 @@ function renderBacktest() {
     tradesCard.append(el("div", {class: "signal"}, more));
   }
   tradesCard.append(el("ul", {class: "notes"},
-    el("li", {text: "Each trade enters at the close of the signal day and ends at its SL, at TP" + options.target + ", or after " + options.max_days + " trading days."}),
-    el("li", {text: "When SL and TP are both touched on the same day, the SL is assumed to come first."}),
-    el("li", {text: "One trade at a time per stock, strategy and side. Commissions, slippage and borrowing costs for shorts are not included."}),
+    el("li", {text: "Each trade enters at the close of the signal day and ends at its SL, at TP" + options.target + ", or after " +
+      holdLabel(options, options.hold) + (hours ? " of market time, followed on hourly prices." : ".")}),
+    el("li", {text: "Each trade risks " + options.risk_pct + "% of the budget at that moment: that is what it loses at its SL. A position is never larger than the budget, and fractions of a share are allowed."}),
+    el("li", {text: "When SL and TP are both touched in the same " + (hours ? "hour" : "day") + ", the SL is assumed to come first."}),
+    el("li", {text: "One trade at a time per strategy and side. Commissions, slippage and borrowing costs for shorts are not included."}),
     el("li", {text: "Past results do not predict future results."})));
   box.append(tradesCard);
   drawCurve();
@@ -564,26 +626,33 @@ function drawCurve() {
     for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
     return node;
   };
-  const time = (date) => Date.parse(date + "T00:00:00Z");
-  const firstEntry = backtestResult.trades.reduce((min, t) => t.entry_date < min ? t.entry_date : min, backtestResult.curve[0].date);
-  const points = [{date: firstEntry, r: 0}, ...backtestResult.curve];
+  // Dates are "YYYY-MM-DD" or "YYYY-MM-DD HH:MM".
+  const time = (stamp) => Date.parse(stamp.replace(" ", "T") + (stamp.length > 10 ? ":00Z" : "T00:00:00Z"));
+  const start = backtestResult.total.start_budget;
+  const firstEntry = backtestResult.trades.reduce((min, t) => t.entry_date < min ? t.entry_date : min, backtestResult.curve[0].date.slice(0, 10));
+  const points = [{date: firstEntry, budget: start}, ...backtestResult.curve];
   const width = box.clientWidth, height = 240;
-  const pad = {left: 44, right: 12, top: 12, bottom: 24};
+  const pad = {left: 56, right: 12, top: 12, bottom: 24};
   const t0 = time(points[0].date), t1 = Math.max(time(points[points.length - 1].date), t0 + 1);
-  let low = Math.min(0, ...points.map((p) => p.r)), high = Math.max(0, ...points.map((p) => p.r));
-  const step = niceStep(Math.max(high - low, 1), 4);
+  let low = Math.min(...points.map((p) => p.budget)), high = Math.max(...points.map((p) => p.budget));
+  const step = niceStep(Math.max(high - low, start * 0.01), 4);
   low = Math.floor(low / step) * step; high = Math.ceil(high / step) * step;
+  if (high === low) high = low + step;
   const x = (t) => pad.left + (t - t0) / (t1 - t0) * (width - pad.left - pad.right);
-  const y = (r) => pad.top + (high - r) / (high - low) * (height - pad.top - pad.bottom);
+  const y = (v) => pad.top + (high - v) / (high - low) * (height - pad.top - pad.bottom);
+  // One style for the whole axis: thousands as K once the axis reaches 10,000.
+  const compact = high >= 10000;
+  const axisLabel = (v) => "$" + (compact ? Number((v / 1000).toFixed(2)) + "K" : Number(v.toFixed(2)).toLocaleString("en-US"));
 
   const svg = svgEl("svg", {viewBox: "0 0 " + width + " " + height, role: "img",
-    "aria-label": "Cumulative result in R over time. The trades table below lists every value."});
+    "aria-label": "Budget after each finished trade. The trades table below lists every trade."});
   for (let value = low; value <= high + step / 2; value += step) {
-    svg.append(svgEl("line", {class: Math.abs(value) < step / 1e6 ? "zero" : "grid", x1: pad.left, x2: width - pad.right, y1: y(value), y2: y(value)}));
+    svg.append(svgEl("line", {class: "grid", x1: pad.left, x2: width - pad.right, y1: y(value), y2: y(value)}));
     const label = svgEl("text", {x: pad.left - 8, y: y(value) + 4, "text-anchor": "end"});
-    label.textContent = (value > 0 ? "+" : "") + Number(value.toFixed(6)) + "R";
+    label.textContent = axisLabel(value);
     svg.append(label);
   }
+  svg.append(svgEl("line", {class: "zero", x1: pad.left, x2: width - pad.right, y1: y(start), y2: y(start)}));
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const ticks = Math.max(2, Math.min(6, Math.floor(width / 130)));
   for (let i = 0; i <= ticks; i++) {
@@ -592,9 +661,9 @@ function drawCurve() {
     label.textContent = months[d.getUTCMonth()] + " " + d.getUTCFullYear();
     svg.append(label);
   }
-  // A step line: the total only changes on the day a trade ends.
-  let path = "M" + x(t0) + "," + y(0);
-  for (const point of points.slice(1)) path += "H" + x(time(point.date)) + "V" + y(point.r);
+  // A step line: the budget only changes when a trade ends.
+  let path = "M" + x(t0) + "," + y(start);
+  for (const point of points.slice(1)) path += "H" + x(time(point.date)) + "V" + y(point.budget);
   svg.append(svgEl("path", {class: "curve", d: path}));
   const cross = svgEl("line", {class: "cross", y1: pad.top, y2: height - pad.bottom, visibility: "hidden"});
   const dot = svgEl("circle", {class: "dot", r: 5, visibility: "hidden"});
@@ -607,12 +676,12 @@ function drawCurve() {
     const t = t0 + (event.clientX - bounds.left - pad.left) / (width - pad.left - pad.right) * (t1 - t0);
     let point = points[0];   // the last point at or before the pointer
     for (const candidate of points) if (time(candidate.date) <= t) point = candidate;
-    const px = x(time(point.date)), py = y(point.r);
+    const px = x(time(point.date)), py = y(point.budget);
     cross.setAttribute("x1", px); cross.setAttribute("x2", px); cross.setAttribute("visibility", "visible");
     dot.setAttribute("cx", px); dot.setAttribute("cy", py); dot.setAttribute("visibility", "visible");
-    tip.replaceChildren(el("b", {text: signed(point.r, 1) + "R"}), document.createTextNode("  " + point.date));
+    tip.replaceChildren(el("b", {text: money0(point.budget)}), document.createTextNode("  " + point.date.slice(0, 10)));
     tip.style.display = "block";
-    tip.style.left = Math.min(Math.max(px, 70), width - 70) + "px";
+    tip.style.left = Math.min(Math.max(px, 80), width - 80) + "px";
     tip.style.top = py + "px";
   };
   svg.addEventListener("pointermove", hover);
@@ -679,13 +748,15 @@ try { startTab = localStorage.getItem("trader-tab") === "backtest" ? "backtest" 
 showTab(startTab);
 $("strategy").addEventListener("change", saveSelection);
 $("direction").addEventListener("change", saveSelection);
+$("bt-hold").addEventListener("change", () => { if (state) renderBacktestControls(); });
 $("bt-run").addEventListener("click", async () => {
   $("bt-run").disabled = true;
   const result = await post("/api/backtest", {
     strategy: $("bt-strategy").value, direction: $("bt-direction").value, symbol: $("bt-symbol").value,
-    years: Number($("bt-years").value), target: Number($("bt-target").value), max_days: Number($("bt-days").value),
+    years: Number($("bt-years").value), target: Number($("bt-target").value), ...holdChoice(),
+    budget: Number($("bt-budget").value), risk_pct: Number($("bt-risk").value),
   });
-  if (result.error) $("bt-status").textContent = result.error;
+  backtestFormError = result.error || "";
   refresh();
 });
 

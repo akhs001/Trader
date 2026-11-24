@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import backtest, emailer, market
-from .data import DataError, SetupError, check_setup, fetch_history, source_of
+from .data import DataError, SetupError, check_setup, fetch_history, fetch_hourly, source_of
 from .main import GMAIL_LOGIN_HELP, ROOT, load_env_file
 from .scanner import (StockResult, check_watchlist, email_signals, load_config,
                       load_watchlist, new_signals)
@@ -198,51 +198,58 @@ class App:
     # --- backtesting ---------------------------------------------------------
 
     def start_backtest(self, body: dict) -> str:
-        """Start a backtest in the background. Returns an error message or ''."""
-        watchlist = load_watchlist(self.watchlist_path)
+        """Start a backtest of one stock in the background. Returns an error message or ''."""
         symbol = str(body.get("symbol") or "").strip().upper()
-        symbols = [symbol] if symbol in watchlist else watchlist
-        if not symbols:
-            return "Your watchlist is empty."
+        if not SYMBOL.match(symbol):
+            return "Type the ticker to test, for example NVDA."
+        in_hours = body.get("hold_unit") == "hours"
         options = backtest.Options(
             strategy=body.get("strategy") if body.get("strategy") in STRATEGIES else "all",
             direction=body.get("direction") if body.get("direction") in ("long", "short") else "both",
-            years=_number(body.get("years"), 2, 1, 5),
+            # Hourly prices only reach back about two years.
+            years=_number(body.get("years"), 2, 1, 2 if in_hours else 5),
             target=_number(body.get("target"), 1, 1, 2),
-            max_days=_number(body.get("max_days"), 30, 1, 250),
+            hold=_number(body.get("hold"), 30, 1, 250),
+            hold_unit="hours" if in_hours else "days",
+            budget=_decimal(body.get("budget"), 10_000.0, 1.0, 1e12),
+            risk_pct=_decimal(body.get("risk_pct"), 1.0, 0.01, 100.0),
         )
         with self.lock:
             if self.backtest["running"]:
                 return "A backtest is already running."
-            self.backtest.update(running=True, done=0, total=len(symbols), current="",
+            self.backtest.update(running=True, done=0, total=1, current=symbol,
                                  message="", error="")
-        threading.Thread(target=self._backtest, args=(symbols, options), daemon=True).start()
+        threading.Thread(target=self._backtest, args=(symbol, options), daemon=True).start()
         return ""
 
-    def _backtest(self, symbols: list[str], options: backtest.Options) -> None:
-        error, trades, skipped = "", [], []
+    def _backtest(self, symbol: str, options: backtest.Options) -> None:
+        error = ""
         try:
             config = self._config()
-            for index, symbol in enumerate(symbols):
-                self._progress(current=symbol, done=index, message="")
-                try:
-                    history = fetch_history(symbol, source=source_of(config), years=options.years,
-                                            notify=lambda text: self._progress(message=text))
-                except DataError as problem:
-                    skipped.append(str(problem))
-                    continue
-                trades.extend(backtest.backtest_stock(history, config, options))
-            result = backtest.report(trades)
-            result.update(options=vars(options), symbols=symbols, skipped=skipped,
+            source = source_of(config)
+            notify = lambda text: self._progress(message=text)
+            history = fetch_history(symbol, source=source, years=options.years, notify=notify)
+            hourly = None
+            if options.hold_unit == "hours":
+                self._progress(message=f"Downloading hourly prices for {symbol}")
+                hourly = fetch_hourly(symbol, source=source, notify=notify)
+            self._progress(message=f"Testing {symbol}")
+            trades = backtest.backtest_stock(history, config, options, hourly)
+            result = backtest.report(trades, options)
+            wanted_from = history.dates[max(0, len(history.dates) - int(options.years * 252))]
+            # The test cannot start before the prices do.
+            covered_from = max(wanted_from, hourly.dates[0][:10]) if hourly else wanted_from
+            result.update(options=vars(options), symbol=symbol, tested_from=covered_from,
+                          tested_to=history.dates[-1], days_of_history=len(history.dates),
                           finished=datetime.now().strftime("%H:%M:%S"))
             self.backtest_result = result
-        except SetupError as problem:
+        except (SetupError, DataError) as problem:
             error = str(problem)
         except Exception as problem:  # show the problem on the page instead of dying silently
             error = f"The backtest failed: {problem}"
         with self.lock:
             self.backtest.update(running=False, current="", message="", error=error,
-                                 done=len(symbols), run=self.backtest["run"] + 1)
+                                 done=1, run=self.backtest["run"] + 1)
 
     def _progress(self, **changes) -> None:
         with self.lock:
@@ -309,6 +316,14 @@ def _number(value, default: int, low: int, high: int) -> int:
         return min(max(int(value), low), high)
     except (TypeError, ValueError):
         return default
+
+
+def _decimal(value, default: float, low: float, high: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(number, low), high) if number == number else default
 
 
 def _count(items: list, one: str, many: str) -> str:

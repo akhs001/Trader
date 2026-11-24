@@ -16,6 +16,7 @@ is its long counterpart upside down.
 
 | Long signal | Fires when | Short signal | Fires when |
 | --- | --- | --- | --- |
+| Uptrend continuation | A massive run up (at least 10 ATR within 60 days, with the 20-day average above the 50-day above the 200-day) gave back 30% to 65% of the run in the last few days, and the price now trades above yesterday's high for the first time. | Downtrend continuation | A massive drop of the same size, with the averages stacked the other way, bounced 30% to 65% of the drop, and the price now trades below yesterday's low for the first time. |
 | Trend pullback | Uptrend (above the 200-day average) dipped at least 2 ATR to its 20- or 50-day average, or to RSI below 40, and now trades above yesterday's high for the first time. | Downtrend rally | Downtrend (below the 200-day average) rallied at least 2 ATR to its 20- or 50-day average, or to RSI above 60, and now trades below yesterday's low for the first time. |
 | Breakout | Price moves above its 20-day high on at least 1.5x average volume. | Breakdown | Price moves below its 20-day low on at least 1.5x average volume. |
 | Oversold bounce | RSI(14) was below 30 yesterday and is back above it. | Overbought reversal | RSI(14) was above 70 yesterday and is back below it. |
@@ -88,8 +89,8 @@ in the project folder. Trader opens in your browser at
 closing it stops Trader.
 
 - **Strategy** and **Direction** choose what a check looks for: all strategies
-  or one of them (trend pullback, breakout, RSI reversal, moving-average
-  cross, MACD cross), and long, short or both. The choice is remembered and
+  or one of them (trend continuation, trend pullback, breakout, RSI reversal,
+  moving-average cross, MACD cross), and long, short or both. The choice is remembered and
   also applies to automatic checks and emails.
 - **Check entries** checks the whole watchlist now. Stocks with a signal
   appear as cards with Entry, SL, TP1 and TP2; the table lists every stock.
@@ -107,30 +108,44 @@ network.
 
 ### Backtest tab
 
-The Backtest tab shows how the strategies would have done on past prices. Pick
-a strategy (or all), a direction, the whole watchlist or one stock, a period
-of 1, 2 or 5 years, which TP ends a trade, and after how many days a trade is
-closed if neither SL nor TP is reached. **Run backtest** then replays the
-period day by day, scanning each past day exactly as a live check would have,
-and trades every signal by its own plan.
+The Backtest tab shows how the strategies would have done on one stock's past
+prices. You choose:
 
-Results are in R: 1R is the amount risked on a trade, the distance from entry
-to SL. A trade stopped out loses 1R; one that reaches TP1 gains 2R. The page
-shows the number of trades, win rate, average and total result, profit factor
-(gains divided by losses; above 1 is profitable), the largest drawdown, a
-chart of the running total, a table per strategy and side, and every trade.
+- **Strategy** and **Direction**: all strategies or one, long, short or both.
+- **Ticker**: any ticker, on your watchlist or not.
+- **Period**: the last 1, 2 or 5 years.
+- **Take profit at**: whether TP1 or TP2 ends a winning trade.
+- **Close after**: how long a trade may stay open if neither SL nor TP is
+  reached, from 1 hour to 60 days. Choices in hours follow each trade on
+  hourly prices, which reach back about two years.
+- **Start budget** and **Risk per trade**: the money you start with, and the
+  share of it a trade loses if its SL is hit.
+
+**Run backtest** replays the period day by day, scanning each past day exactly
+as a live check would have, and trades every signal by its own plan.
+
+The page shows the budget at the end, the profit, the largest drawdown, the
+number of trades, win rate, average result and profit factor (gains divided
+by losses; above 1 is profitable), a chart of the budget over time, a table
+per strategy and side, and every trade. Results per trade are in R: 1R is the
+amount risked on the trade, the distance from entry to SL. A trade stopped out
+loses 1R; one that reaches TP1 gains 2R.
 
 What the backtest assumes:
 
 - A trade enters at the close of the signal day.
-- If SL and TP are both touched on the same day, the SL counts.
+- If SL and TP are both touched in the same candle (day, or hour when the
+  holding time is in hours), the SL counts.
 - A price that opens beyond the SL or TP exits at that opening price.
-- One trade at a time per stock, strategy and side.
+- One trade at a time per strategy and side.
+- Each trade risks the chosen percentage of the budget as it stands at entry.
+  A position is never larger than the budget, and fractions of a share are
+  allowed.
 - No commissions, slippage, or borrowing costs for shorts.
 
 It tells you how the rules behaved in the past on your stocks, which is not a
-promise about the future. A handful of stocks over a couple of years is also a
-small sample.
+promise about the future. One stock over a couple of years is also a small
+sample.
 
 ### Price source
 
