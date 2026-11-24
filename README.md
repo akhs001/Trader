@@ -11,28 +11,40 @@ All signals use daily candles from Yahoo Finance, read through the
 [yfinance](https://github.com/ranaroussi/yfinance) package. During market hours
 today's unfinished candle is included, so a check uses the current price.
 
-| Signal | Fires when |
-| --- | --- |
-| Trend pullback | The stock is in an uptrend (above its 200-day average), dipped at least 2 ATR to its 20- or 50-day average or to RSI below 40 in the last 5 days, and now trades above yesterday's high for the first time. |
-| Breakout | Price moves above its 20-day high on at least 1.5x average volume. |
-| Oversold bounce | RSI(14) was below 30 yesterday and is back above it. |
-| Moving-average cross | The 20-day average crosses above the 50-day average. |
-| MACD cross | MACD (12, 26, 9) crosses above its signal line. |
+Trader looks for long (buy) and short (sell short) entries. Every short signal
+is its long counterpart upside down.
+
+| Long signal | Fires when | Short signal | Fires when |
+| --- | --- | --- | --- |
+| Trend pullback | Uptrend (above the 200-day average) dipped at least 2 ATR to its 20- or 50-day average, or to RSI below 40, and now trades above yesterday's high for the first time. | Downtrend rally | Downtrend (below the 200-day average) rallied at least 2 ATR to its 20- or 50-day average, or to RSI above 60, and now trades below yesterday's low for the first time. |
+| Breakout | Price moves above its 20-day high on at least 1.5x average volume. | Breakdown | Price moves below its 20-day low on at least 1.5x average volume. |
+| Oversold bounce | RSI(14) was below 30 yesterday and is back above it. | Overbought reversal | RSI(14) was above 70 yesterday and is back below it. |
+| Moving-average cross | The 20-day average crosses above the 50-day average. | Moving-average cross down | The 20-day average crosses below the 50-day average. |
+| MACD cross | MACD (12, 26, 9) crosses above its signal line. | MACD cross down | MACD crosses below its signal line. |
+
+To get only one direction, put this in `config.local.toml`:
+
+```toml
+[signals]
+short = false
+```
 
 ## Trade plan
 
 Every alert comes with Entry, SL, TP1 and TP2:
 
 - **Entry** is the price at the moment of the scan.
-- **SL** sits just below the price that would prove the setup wrong: the
-  pullback low, the breakout level, or the recent low. It is kept between 1
+- **SL** sits just beyond the price that would prove the setup wrong: for a
+  long, below the pullback low, the breakout level, or the recent low; for a
+  short, above the rally high, the breakdown level, or the recent high. It is kept between 1
   and 3 ATR from the entry (ATR is the stock's average daily range), so it is
   neither inside everyday noise nor unreasonably far. Average and MACD crosses
-  have no such price, so their SL is 2 ATR below the entry.
-- **TP1 and TP2** are 2 and 3 times the risk (entry minus SL) above the entry.
+  have no such price, so their SL is 2 ATR from the entry.
+- **TP1 and TP2** are 2 and 3 times the risk (the distance from entry to SL)
+  on the profit side: above the entry for a long, below it for a short.
 
-When a stock fires several signals at once, the plan follows the first one
-listed. The levels come from fixed rules, not from a forecast, and have not
+When a stock fires several signals in the same direction at once, the plan
+follows the first one listed. The levels come from fixed rules, not from a forecast, and have not
 been backtested.
 
 ## Settings

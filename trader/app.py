@@ -133,7 +133,7 @@ class App:
             if send_email and fresh:
                 try:
                     recipient = email_signals(fresh, state)
-                    email = f"Emailed {_count(fresh, 'new entry', 'new entries')} to {recipient}."
+                    email = f"Emailed {_count(emailer.by_entry(fresh), 'new entry', 'new entries')} to {recipient}."
                 except emailer.EmailConfigError as problem:
                     email = str(problem)
                 except smtplib.SMTPAuthenticationError:
@@ -232,18 +232,23 @@ def _row(result: StockResult, new_ids: set[int]) -> dict:
     row = {
         "symbol": result.symbol, "price": result.price, "change_pct": result.change_pct,
         "date": result.date, "facts": result.facts, "note": result.note,
-        "error": result.error, "signals": [], "plan": None,
+        "error": result.error, "entries": [],
     }
-    for signal in result.signals:
-        row["signals"].append({"title": signal.title, "reason": signal.reason,
-                               "new": id(signal) in new_ids})
-    first = result.signals[0] if result.signals else None
-    if first and first.plan:
-        row["plan"] = {
-            "levels": [{"label": label, "price": price, "pct": pct}
-                       for label, price, pct in emailer.plan_rows(first)],
-            "note": emailer.plan_note(first, len(result.signals) > 1),
+    # One entry per direction; a stock can show a long and a short at once.
+    for group in emailer.by_entry(result.signals):
+        first = group[0]
+        entry = {
+            "direction": first.direction, "plan": None,
+            "signals": [{"title": s.title, "reason": s.reason, "new": id(s) in new_ids}
+                        for s in group],
         }
+        if first.plan:
+            entry["plan"] = {
+                "levels": [{"label": label, "price": price, "pct": pct}
+                           for label, price, pct in emailer.plan_rows(first)],
+                "note": emailer.plan_note(first, len(group) > 1),
+            }
+        row["entries"].append(entry)
     return row
 
 

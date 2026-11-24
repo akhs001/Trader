@@ -37,8 +37,8 @@ def credentials() -> tuple[str, str, str]:
 
 
 def build_message(signals: list[Signal], sender: str, recipient: str) -> EmailMessage:
-    symbols = list(dict.fromkeys(s.symbol for s in signals))
-    shown = ", ".join(symbols[:5]) + (f" +{len(symbols) - 5} more" if len(symbols) > 5 else "")
+    entries = [f"{group[0].symbol} {group[0].direction}" for group in by_entry(signals)]
+    shown = ", ".join(entries[:5]) + (f" +{len(entries) - 5} more" if len(entries) > 5 else "")
     message = EmailMessage()
     message["Subject"] = f"Entry alert: {shown}"
     message["From"] = sender
@@ -66,10 +66,11 @@ def test_message(sender: str, recipient: str) -> EmailMessage:
     return message
 
 
-def _by_stock(signals: list[Signal]) -> list[list[Signal]]:
-    groups: dict[str, list[Signal]] = {}
+def by_entry(signals: list[Signal]) -> list[list[Signal]]:
+    """Group signals into entries: one per stock and direction (long or short)."""
+    groups: dict[tuple[str, str], list[Signal]] = {}
     for signal in signals:
-        groups.setdefault(signal.symbol, []).append(signal)
+        groups.setdefault((signal.symbol, signal.direction), []).append(signal)
     return list(groups.values())
 
 
@@ -89,7 +90,7 @@ def plan_rows(signal: Signal) -> list[tuple[str, str, str]]:
 
 def plan_note(signal: Signal, several_signals: bool) -> str:
     plan = signal.plan
-    ratios = " and ".join(f"{(t - plan.entry) / plan.risk:g}x" for t in plan.targets)
+    ratios = " and ".join(f"{abs(t - plan.entry) / plan.risk:g}x" for t in plan.targets)
     note = f"SL is {plan.stop_basis}. TP is {ratios} the risk of {plan.risk:.2f} per share."
     if several_signals:
         note += f" Plan based on the {signal.title.lower()} signal."
@@ -98,7 +99,7 @@ def plan_note(signal: Signal, several_signals: bool) -> str:
 
 def _plain_text(signals: list[Signal]) -> str:
     blocks = []
-    for group in _by_stock(signals):
+    for group in by_entry(signals):
         s = group[0]
         reasons = "\n".join(f"  * {g.title}: {g.reason}" for g in group)
         facts = "\n".join(f"  {label}: {value}" for label, value in s.facts.items())
@@ -110,7 +111,7 @@ def _plain_text(signals: list[Signal]) -> str:
             )
             plan = f"  {levels}\n  {plan_note(s, len(group) > 1)}\n"
         blocks.append(
-            f"{_heading(s)}\n"
+            f"{_heading(s)} - {s.direction.upper()}\n"
             f"  Price: {s.price:.2f} ({s.change_pct:+.2f}% today, {s.date})\n"
             f"{plan}{reasons}\n{facts}\n"
             f"  Chart: {_chart_url(s.symbol)}"
@@ -120,7 +121,7 @@ def _plain_text(signals: list[Signal]) -> str:
 
 def _html(signals: list[Signal]) -> str:
     cards = []
-    for group in _by_stock(signals):
+    for group in by_entry(signals):
         s = group[0]
         color = "#137333" if s.change_pct >= 0 else "#c5221f"
         reasons = "".join(
@@ -154,6 +155,7 @@ def _html(signals: list[Signal]) -> str:
         cards.append(f"""
 <div style="border:1px solid #dadce0;border-radius:8px;padding:16px;margin:0 0 14px">
   <div style="font-size:20px;font-weight:700;color:#202124">{escape(s.symbol)}
+    <span style="font-size:12px;font-weight:700;letter-spacing:.05em;color:#ffffff;padding:2px 8px;border-radius:10px;vertical-align:middle;background:{"#c5221f" if s.direction == "short" else "#137333"}">{s.direction.upper()}</span>
     <span style="font-size:14px;font-weight:400;color:#5f6368">{escape(s.name if s.name != s.symbol else "")}</span></div>
   <div style="font-size:16px;color:#202124;margin:2px 0 0">{s.price:.2f}
     <span style="color:{color}">{s.change_pct:+.2f}%</span>

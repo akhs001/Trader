@@ -43,6 +43,15 @@ default_stop_atr = 2.0
 # is twice as far from the entry as the SL, and TP2 three times as far.
 targets_r = [2.0, 3.0]
 
+[signals]
+# Which kinds of entry to look for. Long = buy, short = sell short.
+# Every signal below is described for longs; its short version is the same
+# rule upside down (a rally in a downtrend, a breakdown below the 20-day low,
+# RSI dropping back below 70, the averages or MACD crossing down), with the SL
+# above the entry and the TPs below it.
+long = true
+short = true
+
 [signals.trend_pullback]
 enabled = true
 # Uptrend = price above the 200-day average and 50-day above 200-day.

@@ -57,6 +57,10 @@
   .entry { margin-bottom: 12px; }
   .entry-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; }
   .sym { font-size: 20px; font-weight: 700; }
+  .side { font-size: 12px; font-weight: 700; letter-spacing: .05em; color: #fff; padding: 2px 9px;
+          border-radius: 999px; background: var(--up); align-self: center; }
+  .side.short { background: var(--down); }
+  @media (prefers-color-scheme: dark) { .side { color: #0b1220; } }
   .price { font-size: 16px; font-variant-numeric: tabular-nums; }
   .up { color: var(--up); } .down { color: var(--down); }
   .small { font-size: 12px; color: var(--muted); }
@@ -227,7 +231,7 @@ function render() {
   const done = scan.results.length;
   $("bar").className = "bar" + (scan.running ? " on" : "");
   $("bar").firstElementChild.style.width = scan.total ? (100 * done / scan.total) + "%" : "0";
-  const hits = scan.results.filter((r) => r.signals.length);
+  const hits = scan.results.filter((r) => r.entries && r.entries.length);
   let status = "";
   if (scan.running) {
     status = scan.message || ("Checking " + (scan.current || "…") + " (" + Math.min(done + 1, scan.total) + " of " + scan.total + ")");
@@ -246,7 +250,7 @@ function render() {
   entries.replaceChildren();
   if (hits.length) {
     entries.append(el("h2", {text: "Possible entries"}));
-    for (const row of hits) entries.append(entryCard(row));
+    for (const row of hits) for (const entry of row.entries) entries.append(entryCard(row, entry));
   }
 
   // Watchlist table
@@ -267,7 +271,10 @@ function render() {
     let resultClass = "status-cell";
     if (row) {
       if (row.error) { result = row.error; resultClass += " bad"; }
-      else if (row.signals.length) { result = row.signals.map((s) => s.title).join(", "); resultClass += " hit"; }
+      else if (row.entries && row.entries.length) {
+        result = row.entries.map((e) => (e.direction === "short" ? "Short: " : "Long: ") + e.signals.map((s) => s.title).join(", ")).join(" · ");
+        resultClass += " hit";
+      }
       else if (row.note) result = "Skipped: " + row.note;
       else result = "No entry";
     }
@@ -292,26 +299,27 @@ function banner(before, code, after) {
 
 function plural(count, word) { return count + " " + word + (count === 1 ? "" : "s"); }
 
-function entryCard(row) {
+function entryCard(row, entry) {
   const card = el("section", {class: "card entry"});
   const change = row.change_pct;
   card.append(el("div", {class: "entry-head"},
     el("span", {class: "sym", text: row.symbol}),
+    el("span", {class: "side " + entry.direction, text: entry.direction === "short" ? "SHORT" : "LONG"}),
     el("span", {class: "price", text: money(row.price)}),
     el("span", {class: "price " + (change >= 0 ? "up" : "down"), text: percent(change)}),
     el("span", {class: "small", text: "candle of " + row.date})));
-  if (row.plan) {
+  if (entry.plan) {
     const levels = el("div", {class: "levels"});
-    for (const level of row.plan.levels) {
+    for (const level of entry.plan.levels) {
       const kind = level.label === "SL" ? " sl" : level.label.startsWith("TP") ? " tp" : "";
       levels.append(el("div", {class: "level" + kind},
         el("div", {class: "label", text: level.label}),
         el("div", {class: "value", text: level.price}),
         el("div", {class: "small", text: level.pct || " "})));
     }
-    card.append(levels, el("div", {class: "small", text: row.plan.note}));
+    card.append(levels, el("div", {class: "small", text: entry.plan.note}));
   }
-  for (const signal of row.signals) {
+  for (const signal of entry.signals) {
     card.append(el("div", {class: "signal"},
       el("div", {class: "title"}, document.createTextNode(signal.title),
         el("span", {class: "badge" + (signal.new ? " new" : ""), text: signal.new ? "new" : "already emailed"})),

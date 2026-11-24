@@ -247,6 +247,87 @@ class PlanTests(unittest.TestCase):
         self.assertLess(signal.plan.stop, peak - 9.5)
 
 
+def mirrored(history):
+    """The same chart upside down: every rise becomes an equal fall."""
+    top = 2 * max(history.highs)
+    return History(
+        symbol=history.symbol, name=history.name, dates=history.dates,
+        opens=[top - v for v in history.opens], highs=[top - v for v in history.lows],
+        lows=[top - v for v in history.highs], closes=[top - v for v in history.closes],
+        volumes=history.volumes, session_fraction=history.session_fraction,
+    )
+
+
+class ShortTests(unittest.TestCase):
+    """Short signals are the long ones upside down."""
+
+    PAIRS = {"trend_pullback": "trend_rally", "breakout": "breakdown",
+             "oversold_bounce": "overbought_drop", "ma_cross": "ma_cross_down",
+             "macd_cross": "macd_cross_down"}
+
+    def long_setups(self):
+        yield make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
+        closes = [100 + i * 0.5 for i in range(250)]
+        peak = closes[-1]
+        closes += [peak - 3, peak - 6, peak - 8, peak - 9, peak - 6]
+        yield make_history(closes, highs=[c + 0.5 for c in closes], lows=[c - 0.5 for c in closes])
+        closes = [100.0] * 200 + [100 - i * 1.5 for i in range(1, 21)]
+        yield make_history(closes + [closes[-1] + 12])
+        closes = [200 - i * 0.5 for i in range(200)]
+        for _ in range(60):
+            closes.append(closes[-1] + 1.5)
+            yield make_history(closes)
+
+    def test_every_long_signal_has_a_mirrored_short(self):
+        seen = set()
+        for history in self.long_setups():
+            longs = {s.kind for s in scan(history, CONFIG) if s.direction == "long"}
+            shorts = {s.kind for s in scan(mirrored(history), CONFIG) if s.direction == "short"}
+            self.assertEqual({self.PAIRS[kind] for kind in longs}, shorts)
+            seen |= longs
+        self.assertEqual(seen, set(self.PAIRS))  # every kind was exercised
+
+    def test_short_plan_is_the_long_plan_upside_down(self):
+        history = make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
+        long_plan = next(s for s in scan(history, CONFIG) if s.kind == "breakout").plan
+        flipped = mirrored(history)
+        signal = next(s for s in scan(flipped, CONFIG) if s.kind == "breakdown")
+        plan, top = signal.plan, 2 * max(history.highs)
+        self.assertEqual((signal.direction, plan.direction), ("short", "short"))
+        self.assertAlmostEqual(plan.entry, top - long_plan.entry)
+        self.assertAlmostEqual(plan.stop, top - long_plan.stop)
+        self.assertAlmostEqual(plan.targets[1], top - long_plan.targets[1])
+        self.assertGreater(plan.stop, plan.entry)        # stop above
+        self.assertLess(plan.targets[0], plan.entry)     # targets below
+        self.assertAlmostEqual(plan.risk, long_plan.risk)
+        self.assertIn("just above the breakdown level", plan.stop_basis)
+        self.assertIn("moved below its 20-day low", signal.reason)
+
+    def test_short_wording(self):
+        closes = [100.0] * 200 + [100 + i * 1.5 for i in range(1, 21)]
+        history = make_history(closes + [closes[-1] - 12])
+        signal = next(s for s in scan(history, CONFIG) if s.kind == "overbought_drop")
+        self.assertRegex(signal.reason, r"crossed back below 70 \(yesterday (100|[789]\d), now [3-6]\d\)")
+        self.assertIn("the recent high", signal.plan.stop_basis)
+
+    def test_directions_can_be_switched_off(self):
+        history = make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
+        flipped = mirrored(history)
+        no_shorts = {"signals": {**CONFIG["signals"], "short": False}}
+        no_longs = {"signals": {**CONFIG["signals"], "long": False}}
+        self.assertEqual({s.direction for s in scan(flipped, no_shorts)}, set())
+        self.assertEqual({s.direction for s in scan(history, no_longs)}, set())
+        self.assertEqual({s.direction for s in scan(flipped, no_longs)}, {"short"})
+
+    def test_email_marks_the_direction(self):
+        history = mirrored(make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0]))
+        signals = [s for s in scan(history, CONFIG) if s.kind == "breakdown"]
+        message = emailer.build_message(signals, "me@example.com", "me@example.com")
+        self.assertEqual(message["Subject"], "Entry alert: TEST short")
+        self.assertIn("TEST (Test Corp) - SHORT", message.get_body(("plain",)).get_content())
+        self.assertIn(">SHORT</span>", message.get_body(("html",)).get_content())
+
+
 class DataTests(unittest.TestCase):
     def payload(self):
         # Shape of a real Twelve Data /time_series response: newest first, numbers as strings.
@@ -375,7 +456,7 @@ class StateAndEmailTests(unittest.TestCase):
 
     def test_email_contents(self):
         message = emailer.build_message([self.signal()], "me@example.com", "me@example.com")
-        self.assertEqual(message["Subject"], "Entry alert: TEST")
+        self.assertEqual(message["Subject"], "Entry alert: TEST long")
         text = message.get_body(("plain",)).get_content()
         html = message.get_body(("html",)).get_content()
         for body in (text, html):
@@ -513,22 +594,24 @@ class AppTests(unittest.TestCase):
         scan = self.check(email=True)
         rows = {row["symbol"]: row for row in scan["results"]}
         self.assertEqual(rows["BBB"]["error"], "symbol not found")
-        self.assertIn("Breakout", [s["title"] for s in rows["AAA"]["signals"]])
-        self.assertTrue(all(s["new"] for s in rows["AAA"]["signals"]))
-        self.assertEqual([level["label"] for level in rows["AAA"]["plan"]["levels"]],
+        entry = rows["AAA"]["entries"][0]
+        self.assertEqual(entry["direction"], "long")
+        self.assertIn("Breakout", [s["title"] for s in entry["signals"]])
+        self.assertTrue(all(s["new"] for s in entry["signals"]))
+        self.assertEqual([level["label"] for level in entry["plan"]["levels"]],
                          ["Entry", "SL", "TP1", "TP2"])
         self.assertEqual(len(self.sent), 1)
         self.assertIn("Emailed", scan["email"])
 
         again = self.check(email=True)
         self.assertEqual(len(self.sent), 1)  # nothing new, so no second email
-        self.assertFalse(any(s["new"] for s in again["results"][0]["signals"]))
+        self.assertFalse(any(s["new"] for s in again["results"][0]["entries"][0]["signals"]))
 
     def test_check_without_email(self):
         scan = self.check(email=False)
         self.assertEqual(self.sent, [])
         self.assertEqual(scan["email"], "")
-        self.assertTrue(scan["results"][0]["signals"][0]["new"])
+        self.assertTrue(scan["results"][0]["entries"][0]["signals"][0]["new"])
 
     def test_watchlist_editing(self):
         self.assertEqual(self.call("/api/watchlist/add", {"symbol": " tsla "})[1]["error"], "")
