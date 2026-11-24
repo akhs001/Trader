@@ -1,3 +1,13 @@
+# Default settings for Trader. Updates replace this file, so do not edit it.
+# To change a setting, create a file named config.local.toml next to this one
+# and put only the settings you want to change in it, for example:
+#
+#   [plan]
+#   targets_r = [1.5, 3.0]
+#
+#   [signals.ma_cross]
+#   macd = false
+#
 # Settings for the watchlist scanner. All signals use daily candles; during
 # market hours today's unfinished candle is included, so prices are live
 # (about 15 minutes delayed).

@@ -532,5 +532,66 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.sent, [])
 
 
+class UpdateTests(unittest.TestCase):
+    def archive(self, files, version="abc123"):
+        import io, zipfile
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as bundle:
+            for name, content in files.items():
+                bundle.writestr("Trader-main/" + name, content)
+            bundle.comment = version.encode()
+        return buffer.getvalue()
+
+    def test_update_replaces_program_files_and_keeps_user_files(self):
+        from trader import update
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "trader").mkdir()
+            (root / "trader" / "app.py").write_text("old code")
+            (root / "config.toml").write_text("old settings")
+            (root / "watchlist.txt").write_text("MU\n")
+            (root / ".env").write_text("SECRET=1")
+            (root / ".state").mkdir()
+            (root / ".state" / "alerts.json").write_text("{}")
+
+            first = self.archive({
+                "trader/app.py": "new code", "trader/extra.py": "extra", "config.toml": "new settings",
+                "watchlist.txt": "AAPL\n", ".env": "SECRET=stolen", ".state/alerts.json": "x",
+                "../outside.txt": "escape",
+            }, "v1")
+            messages = update.apply_update(first, root)
+            self.assertIn("3 file(s) changed", messages[0])
+            self.assertEqual((root / "trader" / "app.py").read_text(), "new code")
+            self.assertEqual((root / "config.toml").read_text(), "new settings")
+            self.assertEqual((root / "config.toml.backup").read_text(), "old settings")
+            # The user's own files are untouched, whatever the archive contains.
+            self.assertEqual((root / "watchlist.txt").read_text(), "MU\n")
+            self.assertEqual((root / ".env").read_text(), "SECRET=1")
+            self.assertEqual((root / ".state" / "alerts.json").read_text(), "{}")
+            self.assertFalse((root.parent / "outside.txt").exists())
+
+            self.assertEqual(update.apply_update(first, root), ["Trader is already up to date."])
+
+            # Next version: one file dropped, one edited by the user in between.
+            (root / "trader" / "app.py").write_text("my own tweak")
+            second = self.archive({"trader/app.py": "newer code", "config.toml": "new settings"}, "v2")
+            messages = update.apply_update(second, root)
+            self.assertIn("1 file(s) changed, 1 removed", messages[0])
+            self.assertFalse((root / "trader" / "extra.py").exists())
+            self.assertEqual((root / "trader" / "app.py.backup").read_text(), "my own tweak")
+            self.assertEqual((root / "watchlist.txt").read_text(), "MU\n")
+
+    def test_local_settings_override_defaults(self):
+        from trader.scanner import load_config
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("[plan]\nmin_stop_atr = 1.0\ntargets_r = [2.0, 3.0]\n[alerts]\ncooldown_days = 5\n")
+            self.assertEqual(load_config(path)["plan"]["targets_r"], [2.0, 3.0])
+            (Path(tmp) / "config.local.toml").write_text("[plan]\ntargets_r = [1.5]\n")
+            config = load_config(path)
+            self.assertEqual(config["plan"], {"min_stop_atr": 1.0, "targets_r": [1.5]})
+            self.assertEqual(config["alerts"]["cooldown_days"], 5)
+
+
 if __name__ == "__main__":
     unittest.main()

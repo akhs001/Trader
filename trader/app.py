@@ -13,7 +13,6 @@ import re
 import smtplib
 import threading
 import time
-import tomllib
 import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,7 +21,8 @@ from pathlib import Path
 from . import emailer, market
 from .data import ApiKeyError, api_key
 from .main import GMAIL_LOGIN_HELP, ROOT, load_env_file
-from .scanner import StockResult, check_watchlist, email_signals, load_watchlist, new_signals
+from .scanner import (StockResult, check_watchlist, email_signals, load_config,
+                      load_watchlist, new_signals)
 from .state import AlertState
 
 UI_FILE = Path(__file__).with_name("ui.html")
@@ -70,7 +70,7 @@ class App:
         return setup
 
     def _config(self) -> dict:
-        return tomllib.loads(self.config_path.read_text())
+        return load_config(self.config_path)
 
     def _interval(self) -> int:
         return max(int(self._config().get("schedule", {}).get("interval_minutes", 15)), 1)

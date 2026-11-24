@@ -36,7 +36,18 @@ been backtested.
 ## Settings
 
 Thresholds, the trade-plan rules and the check interval live in `config.toml`,
-where each signal can also be switched off. After a signal is emailed for a stock, the same signal
+where each signal can also be switched off. Do not edit that file, because
+updates replace it. Create `config.local.toml` next to it instead and put only
+the settings you want to change in it:
+
+```toml
+[plan]
+targets_r = [1.5, 3.0]
+
+[signals.ma_cross]
+macd = false
+```
+ After a signal is emailed for a stock, the same signal
 stays quiet for `cooldown_days` (default 5).
 
 ## Setup
@@ -79,6 +90,13 @@ network.
 Each check uses one Twelve Data request per stock. The free plan limits
 requests per minute and per day: with a long watchlist a check pauses when it
 reaches the per-minute limit and continues by itself.
+
+## Updating
+
+Double-click `update.bat` (or run `python3 -m trader.update`). It downloads the
+newest version from GitHub and replaces the program files. Your own files are
+never touched: `.env`, `watchlist.txt`, `config.local.toml` and the alert
+history. Close Trader and start it again afterwards.
 
 ### Without the browser
 

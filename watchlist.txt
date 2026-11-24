@@ -1,7 +1,0 @@
-# Your watchlist: one US ticker per line.
-# Lines starting with # are ignored. Edit this file to add or remove stocks.
-AAPL
-MSFT
-NVDA
-AMZN
-GOOGL

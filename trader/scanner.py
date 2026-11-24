@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -72,6 +73,27 @@ def email_signals(fresh: list[Signal], state: AlertState) -> str:
     state.record(fresh)
     state.save()
     return recipient
+
+
+def load_config(path: Path) -> dict:
+    """Settings from config.toml, with config.local.toml (if any) laid on top.
+
+    The local file holds only the settings the user changed, so updates can
+    replace config.toml without losing them.
+    """
+    config = tomllib.loads(path.read_text())
+    local = path.with_name("config.local.toml")
+    if local.exists():
+        _merge(config, tomllib.loads(local.read_text()))
+    return config
+
+
+def _merge(base: dict, changes: dict) -> None:
+    for key, value in changes.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge(base[key], value)
+        else:
+            base[key] = value
 
 
 def load_watchlist(path: Path) -> list[str]:

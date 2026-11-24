@@ -16,13 +16,13 @@ import os
 import smtplib
 import sys
 import time
-import tomllib
 from datetime import datetime
 from pathlib import Path
 
 from . import emailer, market
 from .data import ApiKeyError, api_key
-from .scanner import StockResult, check_watchlist, email_signals, load_watchlist, new_signals
+from .scanner import (StockResult, check_watchlist, email_signals, load_config,
+                      load_watchlist, new_signals)
 from .state import AlertState
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,7 +48,7 @@ def load_env_file(path: Path) -> None:
 def scan_once(args: argparse.Namespace) -> int:
     """Scan every stock once. Returns 0 on success, 1 if no prices could be read."""
     # Read on every scan, so edits take effect without restarting the bot.
-    config = tomllib.loads(args.config.read_text())
+    config = load_config(args.config)
     symbols = load_watchlist(args.watchlist)
     if not symbols:
         print(f"The watchlist {args.watchlist} is empty; nothing to scan.")
@@ -94,7 +94,7 @@ def run_loop(args: argparse.Namespace) -> None:
     print("Trader bot is running. Leave this window open; press Ctrl+C to stop.")
     waiting = False
     while True:
-        config = tomllib.loads(args.config.read_text())
+        config = load_config(args.config)
         interval = max(int(config.get("schedule", {}).get("interval_minutes", 15)), 1)
         if market.is_scan_time(grace_minutes=interval):
             waiting = False
