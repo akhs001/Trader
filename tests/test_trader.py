@@ -269,6 +269,79 @@ def continuation_setup(retrace=20.0):
     return make_history(closes, highs=[c + 0.5 for c in closes], lows=[c - 0.5 for c in closes])
 
 
+def hourly_history(closes, volumes=None):
+    """Candles one hour apart, seven a day, starting on a Monday."""
+    history = make_history(closes, volumes=volumes)
+    day = date(2025, 1, 6)
+    stamps = []
+    while len(stamps) < len(closes):
+        if day.weekday() < 5:
+            stamps += [f"{day.isoformat()} {hour:02d}:30" for hour in range(9, 16)]
+        day += timedelta(days=1)
+    history.dates = stamps[:len(closes)]
+    return history
+
+
+class HourlyTests(unittest.TestCase):
+    def test_hourly_candles_use_hourly_wording(self):
+        history = hourly_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
+        self.assertTrue(history.hourly)
+        self.assertFalse(make_history([100.0] * 60).hourly)
+        signals = {s.kind: s for s in scan(history, CONFIG)}
+        self.assertIn("20-hour high", signals["breakout"].reason)
+        self.assertIn("20-hour average", signals["ma_cross"].reason)
+        self.assertEqual(signals["breakout"].date, history.dates[-1])
+        self.assertIn("200-hour avg", signals["breakout"].facts)
+        message = emailer.build_message(list(signals.values()), "a@b.c", "a@b.c")
+        self.assertEqual(message["Subject"], "Entry alert (hourly): TEST long")
+
+    def test_change_is_measured_from_the_previous_day(self):
+        from trader.signals import day_change
+        closes = [100.0] * 63 + [101.0, 102.0, 110.0]      # 9 full days, then 3 hours of the 10th
+        history = hourly_history(closes)
+        self.assertEqual(history.dates[-1][11:], "11:30")
+        self.assertAlmostEqual(day_change(history), 10.0)   # against yesterday's close of 100
+        self.assertAlmostEqual(day_change(make_history([100.0, 110.0])), 10.0)
+
+    def test_hourly_alerts_have_their_own_cooldown(self):
+        history = hourly_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
+        signal = next(s for s in scan(history, CONFIG) if s.kind == "breakout")
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AlertState(Path(tmp) / "alerts.json")
+            signal.date = "2025-03-03 10:30"
+            state.record([signal])
+            self.assertEqual(list(state.sent), ["TEST:breakout:1h"])
+            signal.date = "2025-03-03 15:30"
+            self.assertFalse(state.is_new(signal, 5, cooldown_hours=24))
+            signal.date = "2025-03-04 10:30"
+            self.assertTrue(state.is_new(signal, 5, cooldown_hours=24))
+            self.assertFalse(state.is_new(signal, 5, cooldown_hours=48))
+            # A daily signal of the same kind is tracked separately.
+            signal.date = "2025-03-03"
+            self.assertTrue(state.is_new(signal, 5))
+
+    def test_the_forming_hour_is_measured(self):
+        at = lambda *parts: datetime(*parts, tzinfo=timezone.utc)
+        # 23 November 2026 is winter time: 10:30 New York is 15:30 UTC.
+        self.assertAlmostEqual(market.candle_fraction("2026-11-23 10:30", at(2026, 11, 23, 15, 45)), 0.25)
+        self.assertEqual(market.candle_fraction("2026-11-23 10:30", at(2026, 11, 23, 16, 30)), 1.0)
+        self.assertEqual(market.candle_fraction("2026-11-20 10:30", at(2026, 11, 23, 15, 45)), 1.0)
+        # The last candle of the day lasts 30 minutes.
+        self.assertAlmostEqual(market.candle_fraction("2026-11-23 15:30", at(2026, 11, 23, 20, 45)), 0.5)
+        self.assertAlmostEqual(market.candle_fraction("2026-11-23", at(2026, 11, 23, 16, 7, 30)), 0.25)
+
+    def test_backtest_on_hourly_candles_counts_days_as_seven_hours(self):
+        from trader import backtest
+        closes = [100.0] * 259 + [103.0] + [103.2] * 30
+        history = hourly_history(closes, volumes=[1_000_000.0] * 259 + [2_000_000.0] + [1_000_000.0] * 30)
+        def run(hold, unit):
+            options = backtest.Options(strategy="breakout", direction="long", years=0.1, hold=hold, hold_unit=unit)
+            return backtest.backtest_stock(history, CONFIG, options)[0]
+        self.assertEqual((run(3, "hours").reason, run(3, "hours").held), ("time", 3))
+        self.assertEqual((run(2, "days").reason, run(2, "days").held), ("time", 14))
+        self.assertEqual(run(3, "hours").entry_date, history.dates[259])
+
+
 class ContinuationTests(unittest.TestCase):
     def find(self, history):
         return next((s for s in scan(history, CONFIG) if s.kind == "trend_continuation"), None)
@@ -869,7 +942,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual([round(b - a) for a, b in zip(started, started[1:])], [60, 60, 60])
 
     def test_checks_use_the_chosen_strategy(self):
-        self.assertEqual(self.call("/api/state")[1]["selection"], {"strategy": "all", "direction": "both"})
+        self.assertEqual(self.call("/api/state")[1]["selection"], {"strategy": "all", "direction": "both", "timeframe": "1d"})
         self.call("/api/selection", {"strategy": "breakout", "direction": "long"})
         scan = self.check(email=False)
         titles = [s["title"] for e in scan["results"][0]["entries"] for s in e["signals"]]
@@ -880,7 +953,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.check(email=False)["results"][0]["entries"], [])
         # Unknown values are ignored, and the choice survives a restart.
         self.call("/api/selection", {"strategy": "nonsense", "direction": "sideways"})
-        self.assertEqual(self.call("/api/state")[1]["selection"], {"strategy": "breakout", "direction": "short"})
+        self.assertEqual(self.call("/api/state")[1]["selection"], {"strategy": "breakout", "direction": "short", "timeframe": "1d"})
         from trader import app as app_module
         reopened = app_module.App(self.app.watchlist_path, self.app.config_path, self.app.state_path.parent)
         self.assertEqual((reopened.strategy, reopened.direction), ("breakout", "short"))
@@ -926,6 +999,23 @@ class AppTests(unittest.TestCase):
                 if not status["running"]:
                     break
         self.assertEqual(status["error"], "BBB: symbol not found")
+
+    def test_hourly_checks(self):
+        from unittest import mock
+        from trader import scanner
+        asked = []
+
+        def hourly_prices(symbol, source="yahoo", notify=print, days=730):
+            asked.append((symbol, days))
+            return hourly_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
+
+        self.call("/api/selection", {"strategy": "breakout", "direction": "both", "timeframe": "1h"})
+        with mock.patch.object(scanner, "fetch_hourly", hourly_prices):
+            scan = self.check(email=False)
+        self.assertEqual(asked, [("AAA", 60), ("BBB", 60)])
+        self.assertEqual(scan["timeframe"], "1h")
+        self.assertIn("20-hour high", scan["results"][0]["entries"][0]["signals"][0]["reason"])
+        self.assertEqual(self.call("/api/state")[1]["selection"]["timeframe"], "1h")
 
     def test_page_is_told_when_the_program_was_updated(self):
         from unittest import mock

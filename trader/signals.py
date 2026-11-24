@@ -54,7 +54,7 @@ class Signal:
     title: str
     reason: str
     strategy: str  # key of STRATEGIES
-    date: str
+    date: str  # the candle: "YYYY-MM-DD", or "YYYY-MM-DD HH:MM" on hourly candles
     price: float
     change_pct: float
     direction: str = "long"  # "long" (buy) or "short" (sell)
@@ -77,6 +77,18 @@ class _Found:
 def scan(history: History, config: dict) -> list[Signal]:
     """Return every enabled entry signal that is firing on the latest candle."""
     return Analysis(history).scan(config)
+
+
+def day_change(history: History, end: int | None = None) -> float:
+    """Percent change of the latest price against the previous day's close."""
+    end = len(history.closes) if end is None else end
+    before = end - 2
+    if history.hourly:
+        # Step back to the last candle of the day before.
+        day = history.dates[end - 1][:10]
+        while before > 0 and history.dates[before][:10] == day:
+            before -= 1
+    return (history.closes[end - 1] / history.closes[before] - 1) * 100
 
 
 def facts(history: History) -> dict[str, str]:
@@ -107,7 +119,7 @@ class Analysis:
             return []
         cfg = config.get("signals", {})
         readings = self.long.view(end).facts()
-        change_pct = (history.closes[end - 1] / history.closes[end - 2] - 1) * 100
+        change_pct = day_change(history, end)
         signals = []
 
         for direction, market in (("long", self.long), ("short", self.short)):
@@ -192,6 +204,11 @@ class _View:
     def __init__(self, market: _Market, end: int):
         self.market = market
         self.short = market.short
+        # Words for the candle size, so the same sentences fit days and hours.
+        hourly = market.h.hourly
+        self.unit = "hour" if hourly else "day"
+        self.previous = "the previous hour's" if hourly else "yesterday's"
+        self.before = "an hour ago" if hourly else "yesterday"
         self.end = end
         self.start = max(0, end - WINDOW)
         self.close = market.close[self.start:end]
@@ -238,8 +255,8 @@ class _View:
         readings: dict[str, str] = {}
         if self.rsi[-1] is not None:
             readings["RSI(14)"] = f"{self.rsi[-1]:.0f}"
-        for label, series in (("20-day avg", self.sma20), ("50-day avg", self.sma50),
-                              ("200-day avg", self.sma200)):
+        for label, series in ((f"20-{self.unit} avg", self.sma20), (f"50-{self.unit} avg", self.sma50),
+                              (f"200-{self.unit} avg", self.sma200)):
             if series[-1] is not None:
                 readings[label] = f"{series[-1]:.2f}"
         ratio = self.volume_ratio()
@@ -329,21 +346,22 @@ def _trend_continuation(view: _View, settings: dict) -> list[_Found]:
         return []
 
     move_pct = abs(view.price(top) / view.price(start) - 1) * 100
-    days = top_at - start_at
+    took = f"{top_at - start_at} {view.unit}s"
+    unit = view.unit
     trigger = view.price(view.high[-2])
     if view.short:
         return [_Found(
             "trend_continuation", "trend_continuation_down", "Downtrend continuation",
-            f"Strong downtrend (down {move_pct:.0f}% in {days} days, 20-day average below the "
-            f"50-day below the 200-day) bounced {retrace:.0%} of the drop to "
-            f"{view.price(dip):.2f} and is now trading below yesterday's low of {trigger:.2f}.",
+            f"Strong downtrend (down {move_pct:.0f}% in {took}, 20-{unit} average below the "
+            f"50-{unit} below the 200-{unit}) bounced {retrace:.0%} of the drop to "
+            f"{view.price(dip):.2f} and is now trading below {view.previous} low of {trigger:.2f}.",
             dip, "the bounce high",
         )]
     return [_Found(
         "trend_continuation", "trend_continuation", "Uptrend continuation",
-        f"Strong uptrend (up {move_pct:.0f}% in {days} days, 20-day average above the "
-        f"50-day above the 200-day) retraced {retrace:.0%} of the rise to "
-        f"{view.price(dip):.2f} and is now trading above yesterday's high of {trigger:.2f}.",
+        f"Strong uptrend (up {move_pct:.0f}% in {took}, 20-{unit} average above the "
+        f"50-{unit} above the 200-{unit}) retraced {retrace:.0%} of the rise to "
+        f"{view.price(dip):.2f} and is now trading above {view.previous} high of {trigger:.2f}.",
         dip, "the retrace low",
     )]
 
@@ -373,9 +391,9 @@ def _trend_pullback(view: _View, settings: dict) -> list[_Found]:
     reached = None
     for i in range(len(view.close) - 1 - lookback, len(view.close) - 1):
         if view.low[i] <= view.sma50[i] + abs(view.sma50[i]) * touch:
-            reached = "its 50-day average"
+            reached = f"its 50-{view.unit} average"
         elif view.low[i] <= view.sma20[i] + abs(view.sma20[i]) * touch:
-            reached = reached or "its 20-day average"
+            reached = reached or f"its 20-{view.unit} average"
         elif view.rsi[i] is not None and view.rsi[i] < rsi_below:
             side = "above" if view.short else "below"
             reached = reached or f"RSI {side} {view.real_rsi(rsi_below):.0f}"
@@ -386,14 +404,14 @@ def _trend_pullback(view: _View, settings: dict) -> list[_Found]:
     if view.short:
         return [_Found(
             "trend_pullback", "trend_rally", "Downtrend rally",
-            f"Downtrend (below the 200-day average) rallied to {reached} "
-            f"and is now trading below yesterday's low of {trigger:.2f}.",
+            f"Downtrend (below the 200-{view.unit} average) rallied to {reached} "
+            f"and is now trading below {view.previous} low of {trigger:.2f}.",
             extreme, "the rally high",
         )]
     return [_Found(
         "trend_pullback", "trend_pullback", "Trend pullback",
-        f"Uptrend (above the 200-day average) pulled back to {reached} "
-        f"and is now trading above yesterday's high of {trigger:.2f}.",
+        f"Uptrend (above the 200-{view.unit} average) pulled back to {reached} "
+        f"and is now trading above {view.previous} high of {trigger:.2f}.",
         extreme, "the pullback low",
     )]
 
@@ -419,13 +437,13 @@ def _breakout(view: _View, settings: dict) -> list[_Found]:
     if view.short:
         return [_Found(
             "breakout", "breakdown", "Breakdown",
-            f"Price moved below its {lookback}-day low of {view.price(level):.2f} "
+            f"Price moved below its {lookback}-{view.unit} low of {view.price(level):.2f} "
             f"on {ratio:.1f}x average volume.",
             level, "the breakdown level",
         )]
     return [_Found(
         "breakout", "breakout", "Breakout",
-        f"Price moved above its {lookback}-day high of {view.price(level):.2f} "
+        f"Price moved above its {lookback}-{view.unit} high of {view.price(level):.2f} "
         f"on {ratio:.1f}x average volume.",
         level, "the breakout level",
     )]
@@ -442,12 +460,12 @@ def _oversold_bounce(view: _View, settings: dict) -> list[_Found]:
         return [_Found(
             "rsi_reversal", "overbought_drop", "Overbought reversal",
             f"RSI(14) crossed back below {view.real_rsi(level):.0f} "
-            f"(yesterday {was:.0f}, now {now:.0f}).",
+            f"({view.before} {was:.0f}, now {now:.0f}).",
             min(view.low[-5:]), "the recent high",
         )]
     return [_Found(
         "rsi_reversal", "oversold_bounce", "Oversold bounce",
-        f"RSI(14) crossed back above {level:.0f} (yesterday {was:.0f}, now {now:.0f}).",
+        f"RSI(14) crossed back above {level:.0f} ({view.before} {was:.0f}, now {now:.0f}).",
         min(view.low[-5:]), "the recent low",
     )]
 
@@ -464,8 +482,8 @@ def _ma_cross(view: _View, settings: dict) -> list[_Found]:
             "ma_cross",
             "ma_cross_down" if view.short else "ma_cross",
             "Moving-average cross down" if view.short else "Moving-average cross",
-            f"The {fast_n}-day average ({view.price(fast[-1]):.2f}) crossed {way} "
-            f"the {slow_n}-day average ({view.price(slow[-1]):.2f}).",
+            f"The {fast_n}-{view.unit} average ({view.price(fast[-1]):.2f}) crossed {way} "
+            f"the {slow_n}-{view.unit} average ({view.price(slow[-1]):.2f}).",
         ))
 
     if settings.get("macd", True):

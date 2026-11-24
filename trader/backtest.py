@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
-from .data import History
+from .data import HOURS_PER_DAY, History
 from .scanner import wanted
 from .signals import STRATEGIES, Analysis, Signal
 
@@ -66,9 +66,15 @@ def backtest_stock(history: History, config: dict, options: Options,
     """
     analysis = Analysis(history)
     count = len(history.closes)
-    first = max(0, count - int(options.years * 252))  # about 252 trading days a year
+    per_day = HOURS_PER_DAY if history.hourly else 1
+    first = max(0, count - int(options.years * 252 * per_day))  # about 252 trading days a year
+    # How many candles a trade may last. Signals on hourly candles are followed
+    # on those same candles, so a holding time in days becomes hours.
+    limit = options.hold
+    if history.hourly and options.hold_unit == "days":
+        limit *= HOURS_PER_DAY
     day_index = {day: i for i, day in enumerate(history.dates)}
-    hours = _HourlyBars(hourly) if hourly else None
+    hours = _HourlyBars(hourly) if hourly and not history.hourly else None
     busy_until: dict[tuple[str, str], int] = {}  # one trade at a time per strategy and direction
     trades = []
     for day in range(first, count):
@@ -84,7 +90,7 @@ def backtest_stock(history: History, config: dict, options: Options,
             else:
                 bars = [_Bar(history.dates[i], history.opens[i], history.highs[i],
                              history.lows[i], history.closes[i]) for i in range(day + 1, count)]
-            trade = _simulate(history, day, signal, bars, options)
+            trade = _simulate(history, day, signal, bars, options, limit)
             if trade.reason == "open":
                 busy_until[key] = count
             elif hours:
@@ -123,8 +129,8 @@ class _HourlyBars:
 
 
 def _simulate(history: History, day: int, signal: Signal, bars: list[_Bar],
-              options: Options) -> Trade:
-    """Follow one trade from its entry at the close of `day` to its exit."""
+              options: Options, limit: int) -> Trade:
+    """Follow one trade from its entry at the close of candle `day` to its exit."""
     plan = signal.plan
     sign = 1 if signal.direction == "long" else -1
     target = plan.targets[min(options.target, len(plan.targets)) - 1]
@@ -145,7 +151,7 @@ def _simulate(history: History, day: int, signal: Signal, bars: list[_Bar],
             exit_price, reason = plan.stop, "stop"
         elif sign * (in_favour - target) >= 0:
             exit_price, reason = target, "target"
-        elif number >= options.hold:
+        elif number >= limit:
             exit_price, reason = bar.close, "time"
         else:
             continue
@@ -172,7 +178,8 @@ def apply_budget(trades: list[Trade], budget: float, risk_pct: float) -> None:
     done: list[Trade] = []
     for trade in sorted(trades, key=lambda t: t.entry_date):
         # Money available at the entry: the start plus every trade ended by then.
-        equity = budget + sum(t.pnl for t in done if t.exit_date[:10] <= trade.entry_date)
+        entered = trade.entry_date
+        equity = budget + sum(t.pnl for t in done if t.exit_date[:len(entered)] <= entered)
         risk_per_share = abs(trade.entry - trade.stop)
         if equity <= 0 or risk_per_share <= 0:
             trade.shares = 0.0

@@ -158,6 +158,12 @@
           <option value="short">Short only</option>
         </select>
       </label>
+      <label>Candles
+        <select id="timeframe">
+          <option value="1d">Daily</option>
+          <option value="1h">Hourly (day trading)</option>
+        </select>
+      </label>
     </div>
     <div class="controls">
       <button class="primary" id="check">Check entries</button>
@@ -196,6 +202,12 @@
             <option value="both">Long and short</option>
             <option value="long">Long only</option>
             <option value="short">Short only</option>
+          </select>
+        </label>
+        <label>Candles
+          <select id="bt-timeframe">
+            <option value="1d">Daily</option>
+            <option value="1h">Hourly (day trading)</option>
           </select>
         </label>
         <label>Ticker
@@ -333,6 +345,7 @@ function render() {
   const selection = state.selection || {strategy: "all", direction: "both"};
   if (document.activeElement !== $("strategy")) $("strategy").value = selection.strategy;
   if (document.activeElement !== $("direction")) $("direction").value = selection.direction;
+  if (document.activeElement !== $("timeframe")) $("timeframe").value = selection.timeframe || "1d";
   renderBacktestControls();
 
   // Controls
@@ -361,7 +374,7 @@ function render() {
   if (scan.running) {
     status = scan.message || ("Checking " + (scan.current || "…") + " (" + Math.min(done + 1, scan.total) + " of " + scan.total + ")");
   } else if (scan.finished) {
-    status = "Checked at " + scan.finished + " for " + selectionLabel(scan.strategy, scan.direction) + ": " + (hits.length ? plural(hits.length, "stock") + " with a possible entry" : "no entries right now") + ". " + (scan.email || "");
+    status = "Checked at " + scan.finished + " for " + selectionLabel(scan.strategy, scan.direction, scan.timeframe) + ": " + (hits.length ? plural(hits.length, "stock") + " with a possible entry" : "no entries right now") + ". " + (scan.email || "");
     if (auto.enabled && !market.open) status += " Automatic checks resume when the market opens.";
   } else if (watchlist.length === 0) {
     status = "Add a ticker to your watchlist to get started.";
@@ -426,14 +439,16 @@ function fillStrategies(select, strategies) {
   for (const strategy of strategies) select.append(el("option", {value: strategy.id, text: strategy.name}));
 }
 
-function selectionLabel(strategy, direction) {
+function selectionLabel(strategy, direction, timeframe) {
   const found = ((state && state.strategies) || []).find((item) => item.id === strategy);
   const name = found ? found.name : "all strategies";
-  return name + (direction === "long" ? ", long only" : direction === "short" ? ", short only" : "");
+  return name + (direction === "long" ? ", long only" : direction === "short" ? ", short only" : "") +
+    (timeframe === "1h" ? ", hourly candles" : "");
 }
 
 async function saveSelection() {
-  await post("/api/selection", {strategy: $("strategy").value, direction: $("direction").value});
+  await post("/api/selection", {strategy: $("strategy").value, direction: $("direction").value,
+    timeframe: $("timeframe").value});
   refresh();
 }
 
@@ -480,7 +495,7 @@ function renderBacktestControls() {
     $("bt-symbol").value = state.watchlist[0];
   }
   // Hourly prices only reach back about two years.
-  const hours = holdChoice().hold_unit === "hours";
+  const hours = holdChoice().hold_unit === "hours" || $("bt-timeframe").value === "1h";
   $("bt-years").querySelector('option[value="5"]').disabled = hours;
   if (hours && $("bt-years").value === "5") $("bt-years").value = "2";
 
@@ -528,13 +543,14 @@ function renderBacktest() {
   if (!result) return;
   const total = result.total;
   const options = result.options;
-  const hours = options.hold_unit === "hours";
-  box.append(el("h2", {text: "Result: " + result.symbol + ", " + selectionLabel(options.strategy, options.direction) +
+  const hourlySignals = result.timeframe === "1h";
+  const hours = options.hold_unit === "hours" || hourlySignals;
+  box.append(el("h2", {text: "Result: " + result.symbol + ", " + selectionLabel(options.strategy, options.direction, result.timeframe) +
     ", " + result.tested_from + " to " + result.tested_to}));
   if (!total.trades) {
     box.append(el("section", {class: "card"}, el("div", {class: "empty",
       text: "No finished trades in this period." + (total.open ? " " + plural(total.open, "trade") + " still open." : "") +
-        (result.days_of_history < 260 ? " " + result.symbol + " has only " + result.days_of_history + " days of price history." : "")})));
+        (result.candles < 260 ? " " + result.symbol + " has only " + result.candles + (hourlySignals ? " hours" : " days") + " of price history." : "")})));
     return;
   }
   const tone = total.profit >= 0 ? "up" : "down";
@@ -600,7 +616,7 @@ function renderBacktest() {
     tradesCard.append(el("div", {class: "signal"}, more));
   }
   tradesCard.append(el("ul", {class: "notes"},
-    el("li", {text: "Each trade enters at the close of the signal day and ends at its SL, at TP" + options.target + ", or after " +
+    el("li", {text: "Each trade enters at the close of the signal " + (hourlySignals ? "hour" : "day") + " and ends at its SL, at TP" + options.target + ", or after " +
       holdLabel(options, options.hold) + (hours ? " of market time, followed on hourly prices." : ".")}),
     el("li", {text: "Each trade risks " + options.risk_pct + "% of the budget at that moment: that is what it loses at its SL. A position is never larger than the budget, and fractions of a share are allowed."}),
     el("li", {text: "When SL and TP are both touched in the same " + (hours ? "hour" : "day") + ", the SL is assumed to come first."}),
@@ -748,11 +764,14 @@ try { startTab = localStorage.getItem("trader-tab") === "backtest" ? "backtest" 
 showTab(startTab);
 $("strategy").addEventListener("change", saveSelection);
 $("direction").addEventListener("change", saveSelection);
+$("timeframe").addEventListener("change", saveSelection);
+$("bt-timeframe").addEventListener("change", () => { if (state) renderBacktestControls(); });
 $("bt-hold").addEventListener("change", () => { if (state) renderBacktestControls(); });
 $("bt-run").addEventListener("click", async () => {
   $("bt-run").disabled = true;
   const result = await post("/api/backtest", {
     strategy: $("bt-strategy").value, direction: $("bt-direction").value, symbol: $("bt-symbol").value,
+    timeframe: $("bt-timeframe").value,
     years: Number($("bt-years").value), target: Number($("bt-target").value), ...holdChoice(),
     budget: Number($("bt-budget").value), risk_pct: Number($("bt-risk").value),
   });

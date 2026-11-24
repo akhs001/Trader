@@ -59,14 +59,15 @@ class App:
         self.lock = threading.Lock()
         self.scan = {"running": False, "results": [], "total": 0, "current": "",
                      "message": "", "finished": "", "error": "", "email": "",
-                     "strategy": "all", "direction": "both"}
+                     "strategy": "all", "direction": "both", "timeframe": "1d"}
         settings = self._load_settings()
         self.auto = bool(settings.get("auto"))
         self.interval = settings.get("interval")  # minutes; None = the default from the settings file
         self.last_auto = 0.0
         # Which signals checks look for: one strategy or all, long, short or both.
-        self.strategy, self.direction = "all", "both"
-        self.set_selection(settings.get("strategy"), settings.get("direction"), save=False)
+        self.strategy, self.direction, self.hourly = "all", "both", False
+        self.set_selection(settings.get("strategy"), settings.get("direction"),
+                           settings.get("timeframe"), save=False)
         self.backtest = {"running": False, "done": 0, "total": 0, "current": "", "message": "",
                          "error": "", "run": 0}
         self.backtest_result: dict | None = None
@@ -83,7 +84,8 @@ class App:
             "auto": {"enabled": self.auto, "interval": self._interval(),
                      "min": MIN_INTERVAL, "max": MAX_INTERVAL},
             "strategies": [{"id": key, "name": name} for key, name in STRATEGIES.items()],
-            "selection": {"strategy": self.strategy, "direction": self.direction},
+            "selection": {"strategy": self.strategy, "direction": self.direction,
+                          "timeframe": "1h" if self.hourly else "1d"},
             "backtest": dict(self.backtest),
             "market": {"open": market.is_scan_time(), "time": now.strftime("%a %H:%M")},
             "setup": self._setup(),
@@ -126,7 +128,8 @@ class App:
                 return False
             self.scan.update(running=True, results=[], total=len(symbols), current="",
                              message="", error="", email="",
-                             strategy=self.strategy, direction=self.direction)
+                             strategy=self.strategy, direction=self.direction,
+                             timeframe="1h" if self.hourly else "1d")
         threading.Thread(target=self._check, args=(symbols, send_email), daemon=True).start()
         return True
 
@@ -141,6 +144,7 @@ class App:
                 on_result=lambda result: self._add_result(result, state, config),
                 notify=lambda text: self._update(message=text),
                 strategy=self.scan["strategy"], direction=self.scan["direction"],
+                hourly=self.scan["timeframe"] == "1h",
             )
             fresh = new_signals(results, state, config)
             if send_email and fresh:
@@ -179,12 +183,17 @@ class App:
             pass  # no usable number sent: keep the current interval
         self._save_settings()
 
-    def set_selection(self, strategy, direction, save: bool = True) -> None:
-        """Choose which signals checks look for. Unknown values are ignored."""
+    def set_selection(self, strategy, direction, timeframe=None, save: bool = True) -> None:
+        """Choose which signals checks look for, and on which candles.
+
+        Unknown values are ignored.
+        """
         if strategy == "all" or strategy in STRATEGIES:
             self.strategy = strategy
         if direction in ("both", "long", "short"):
             self.direction = direction
+        if timeframe in ("1d", "1h"):
+            self.hourly = timeframe == "1h"
         if save:
             self._save_settings()
 
@@ -193,6 +202,7 @@ class App:
         self.settings_path.write_text(json.dumps({
             "auto": self.auto, "interval": self.interval,
             "strategy": self.strategy, "direction": self.direction,
+            "timeframe": "1h" if self.hourly else "1d",
         }))
 
     # --- backtesting ---------------------------------------------------------
@@ -203,11 +213,12 @@ class App:
         if not SYMBOL.match(symbol):
             return "Type the ticker to test, for example NVDA."
         in_hours = body.get("hold_unit") == "hours"
+        hourly_signals = body.get("timeframe") == "1h"
         options = backtest.Options(
             strategy=body.get("strategy") if body.get("strategy") in STRATEGIES else "all",
             direction=body.get("direction") if body.get("direction") in ("long", "short") else "both",
             # Hourly prices only reach back about two years.
-            years=_number(body.get("years"), 2, 1, 2 if in_hours else 5),
+            years=_number(body.get("years"), 2, 1, 2 if in_hours or hourly_signals else 5),
             target=_number(body.get("target"), 1, 1, 2),
             hold=_number(body.get("hold"), 30, 1, 250),
             hold_unit="hours" if in_hours else "days",
@@ -219,28 +230,35 @@ class App:
                 return "A backtest is already running."
             self.backtest.update(running=True, done=0, total=1, current=symbol,
                                  message="", error="")
-        threading.Thread(target=self._backtest, args=(symbol, options), daemon=True).start()
+        threading.Thread(target=self._backtest, args=(symbol, options, hourly_signals),
+                         daemon=True).start()
         return ""
 
-    def _backtest(self, symbol: str, options: backtest.Options) -> None:
+    def _backtest(self, symbol: str, options: backtest.Options, hourly_signals: bool) -> None:
         error = ""
         try:
             config = self._config()
             source = source_of(config)
             notify = lambda text: self._progress(message=text)
-            history = fetch_history(symbol, source=source, years=options.years, notify=notify)
             hourly = None
-            if options.hold_unit == "hours":
-                self._progress(message=f"Downloading hourly prices for {symbol}")
-                hourly = fetch_hourly(symbol, source=source, notify=notify)
+            if hourly_signals:
+                # Signals and exits both come from hourly candles.
+                history = fetch_hourly(symbol, source=source, notify=notify)
+            else:
+                history = fetch_history(symbol, source=source, years=options.years, notify=notify)
+                if options.hold_unit == "hours":
+                    self._progress(message=f"Downloading hourly prices for {symbol}")
+                    hourly = fetch_hourly(symbol, source=source, notify=notify)
             self._progress(message=f"Testing {symbol}")
             trades = backtest.backtest_stock(history, config, options, hourly)
             result = backtest.report(trades, options)
-            wanted_from = history.dates[max(0, len(history.dates) - int(options.years * 252))]
+            per_day = backtest.HOURS_PER_DAY if hourly_signals else 1
+            wanted_from = history.dates[max(0, len(history.dates) - int(options.years * 252 * per_day))][:10]
             # The test cannot start before the prices do.
             covered_from = max(wanted_from, hourly.dates[0][:10]) if hourly else wanted_from
             result.update(options=vars(options), symbol=symbol, tested_from=covered_from,
-                          tested_to=history.dates[-1], days_of_history=len(history.dates),
+                          timeframe="1h" if hourly_signals else "1d",
+                          tested_to=history.dates[-1][:10], candles=len(history.dates),
                           finished=datetime.now().strftime("%H:%M:%S"))
             self.backtest_result = result
         except (SetupError, DataError) as problem:
@@ -394,7 +412,7 @@ def make_handler(app: App):
                 app.set_auto(bool(body.get("enabled")), body.get("interval"))
                 self._json({"error": ""})
             elif self.path == "/api/selection":
-                app.set_selection(body.get("strategy"), body.get("direction"))
+                app.set_selection(body.get("strategy"), body.get("direction"), body.get("timeframe"))
                 self._json({"error": ""})
             elif self.path == "/api/backtest":
                 self._json({"error": app.start_backtest(body)})

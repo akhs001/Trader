@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from .signals import Signal
@@ -19,11 +19,17 @@ class AlertState:
             except (json.JSONDecodeError, AttributeError):
                 self.sent = {}  # a corrupt file only costs a repeated alert
 
-    def is_new(self, signal: Signal, cooldown_days: int) -> bool:
+    def is_new(self, signal: Signal, cooldown_days: int, cooldown_hours: int = 24) -> bool:
+        """Whether the signal may be emailed: not sent within its cooldown.
+
+        Daily signals wait `cooldown_days`; hourly ones wait `cooldown_hours`.
+        """
         last = self.sent.get(_key(signal))
         if last is None:
             return True
-        gap = date.fromisoformat(signal.date) - date.fromisoformat(last)
+        gap = datetime.fromisoformat(signal.date) - datetime.fromisoformat(last)
+        if len(signal.date) > 10:
+            return gap >= timedelta(hours=max(cooldown_hours, 1))
         return gap >= timedelta(days=max(cooldown_days, 1))
 
     def record(self, signals: list[Signal]) -> None:
@@ -38,4 +44,6 @@ class AlertState:
 
 
 def _key(signal: Signal) -> str:
-    return f"{signal.symbol}:{signal.kind}"
+    # Hourly signals are remembered separately from daily ones.
+    hourly = ":1h" if len(signal.date) > 10 else ""
+    return f"{signal.symbol}:{signal.kind}{hourly}"

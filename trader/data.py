@@ -80,15 +80,19 @@ def _yfinance():
     return yfinance
 
 
-def fetch_hourly(symbol: str, source: str = DEFAULT_SOURCE, notify=print) -> History:
-    """Download hourly candles, as far back as the source has them (about 2 years).
+HOURS_PER_DAY = 7  # hourly candles in a regular US session (the last is 30 minutes)
+
+
+def fetch_hourly(symbol: str, source: str = DEFAULT_SOURCE, notify=print, days: int = 730) -> History:
+    """Download hourly candles for the last `days` (at most about 2 years exist).
 
     The `dates` of the result are "YYYY-MM-DD HH:MM" in the exchange's time.
     """
     if source == "twelvedata":
-        return fetch_twelve_data(symbol, notify=notify, bars=5000, interval="1h")
+        return fetch_twelve_data(symbol, notify=notify, interval="1h",
+                                 bars=min(days * HOURS_PER_DAY, 5000))
     check_setup(source)
-    return fetch_yahoo(symbol, period="730d", interval="1h")
+    return fetch_yahoo(symbol, period=f"{min(days, 730)}d", interval="1h")
 
 
 def fetch_yahoo(symbol: str, period: str = "2y", interval: str = "1d") -> History:
@@ -120,7 +124,7 @@ def history_from_frame(symbol: str, frame, hourly: bool = False) -> History:
         history.volumes = [float(v) if v == v else 0.0 for v in frame["Volume"]]
     if not history.dates:
         raise DataError(f"{symbol}: no price data (is the ticker right?)")
-    history.session_fraction = market.session_fraction(history.dates[-1])
+    history.session_fraction = market.candle_fraction(history.dates[-1])
     return history
 
 
@@ -140,6 +144,11 @@ class History:
     # How much of today's regular session has elapsed for the last candle:
     # 1.0 when the candle is complete, less while the market is still open.
     session_fraction: float = 1.0
+
+    @property
+    def hourly(self) -> bool:
+        """True when each candle is an hour (dates carry a time), not a day."""
+        return bool(self.dates) and len(self.dates[-1]) > 10
 
 
 def api_key() -> str:
@@ -211,5 +220,5 @@ def parse_time_series(symbol: str, payload: dict, hourly: bool = False) -> Histo
     if not history.dates:
         raise DataError(f"{symbol}: no price data returned")
 
-    history.session_fraction = market.session_fraction(history.dates[-1])
+    history.session_fraction = market.candle_fraction(history.dates[-1])
     return history

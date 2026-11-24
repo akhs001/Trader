@@ -49,6 +49,19 @@ def session_fraction(candle_date: str, utc_now: datetime | None = None) -> float
     return max((now - opened) / (closed - opened), 0.0)
 
 
+def candle_fraction(candle: str, utc_now: datetime | None = None) -> float:
+    """How much of a candle has elapsed: a day ("YYYY-MM-DD") or an hour ("YYYY-MM-DD HH:MM")."""
+    if len(candle) <= 10:
+        return session_fraction(candle, utc_now)
+    now = new_york_time(utc_now)
+    opened = datetime.strptime(candle, "%Y-%m-%d %H:%M")
+    # The last candle of the day is cut short by the close.
+    closed = min(opened + timedelta(hours=1), datetime.combine(opened.date(), CLOSE))
+    if now >= closed or closed <= opened:
+        return 1.0
+    return max((now - opened) / (closed - opened), 0.0)
+
+
 def _nth_sunday(year: int, month: int, n: int) -> datetime:
     first = datetime(year, month, 1)
     days_to_sunday = (6 - first.weekday()) % 7

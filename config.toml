@@ -28,6 +28,8 @@ interval_minutes = 15
 # After a signal fires for a stock, the same signal is not emailed again
 # for this many calendar days.
 cooldown_days = 5
+# The same, for signals from hourly candles.
+cooldown_hours = 24
 
 [plan]
 # Every alert comes with a trade plan: Entry, SL and TP.

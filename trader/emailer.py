@@ -40,7 +40,8 @@ def build_message(signals: list[Signal], sender: str, recipient: str) -> EmailMe
     entries = [f"{group[0].symbol} {group[0].direction}" for group in by_entry(signals)]
     shown = ", ".join(entries[:5]) + (f" +{len(entries) - 5} more" if len(entries) > 5 else "")
     message = EmailMessage()
-    message["Subject"] = f"Entry alert: {shown}"
+    hourly = " (hourly)" if signals and len(signals[0].date) > 10 else ""
+    message["Subject"] = f"Entry alert{hourly}: {shown}"
     message["From"] = sender
     message["To"] = recipient
     message.set_content(_plain_text(signals))
