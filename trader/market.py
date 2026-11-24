@@ -33,6 +33,22 @@ def is_scan_time(grace_minutes: int = 0, utc_now: datetime | None = None) -> boo
     return opened <= now <= closed
 
 
+def session_fraction(candle_date: str, utc_now: datetime | None = None) -> float:
+    """How much of the regular session has elapsed for a daily candle.
+
+    1.0 for a finished day; between 0 and 1 for today's candle while the
+    market is open.
+    """
+    now = new_york_time(utc_now)
+    if candle_date != now.date().isoformat():
+        return 1.0
+    opened = datetime.combine(now.date(), OPEN)
+    closed = datetime.combine(now.date(), CLOSE)
+    if now >= closed:
+        return 1.0
+    return max((now - opened) / (closed - opened), 0.0)
+
+
 def _nth_sunday(year: int, month: int, n: int) -> datetime:
     first = datetime(year, month, 1)
     days_to_sunday = (6 - first.weekday()) % 7

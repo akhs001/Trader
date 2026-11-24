@@ -6,7 +6,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from trader import emailer, indicators, market
-from trader.data import DataError, History, parse_chart
+from trader.data import ApiKeyError, DataError, History, parse_time_series
 from trader.main import load_env_file, load_watchlist
 from trader.signals import scan
 from trader.state import AlertState
@@ -133,6 +133,15 @@ class SignalTests(unittest.TestCase):
         turned = make_history(closes, highs=highs, lows=lows)
         self.assertIn("trend_pullback", kinds(turned))
 
+        # A dip that is too shallow does not count...
+        shallow = {"signals": {**CONFIG["signals"], "trend_pullback": {"min_depth_atr": 50}}}
+        self.assertNotIn("trend_pullback", kinds(turned, shallow))
+        # ...and neither does the second up day in a row.
+        closes.append(closes[-1] + 3)
+        highs.append(closes[-1] + 0.5)
+        lows.append(closes[-1] - 0.5)
+        self.assertNotIn("trend_pullback", kinds(make_history(closes, highs=highs, lows=lows)))
+
     def test_no_pullback_signal_in_downtrend(self):
         closes = [300 - i * 0.5 for i in range(250)]
         closes.append(closes[-1] + 5)
@@ -239,46 +248,76 @@ class PlanTests(unittest.TestCase):
 
 
 class DataTests(unittest.TestCase):
-    def payload(self, **meta):
-        return {"chart": {"error": None, "result": [{
-            "meta": {"shortName": "Apple Inc.", "gmtoffset": -18000, **meta},
-            # 2024-01-02, -03, -04 at 14:30 UTC (09:30 New York)
-            "timestamp": [1704205800, 1704292200, 1704378600],
-            "indicators": {"quote": [{
-                "open": [10.0, None, 12.0], "high": [11.0, None, 13.0],
-                "low": [9.0, None, 11.0], "close": [10.5, None, 12.5],
-                "volume": [100, None, 300],
-            }]},
-        }]}}
+    def payload(self):
+        # Shape of a real Twelve Data /time_series response: newest first, numbers as strings.
+        return {"meta": {"symbol": "AAPL", "interval": "1day", "exchange": "NASDAQ"},
+                "values": [
+                    {"datetime": "2024-01-04", "open": "12.0", "high": "13.0", "low": "11.0",
+                     "close": "12.5", "volume": "300"},
+                    {"datetime": "2024-01-03", "open": None, "high": None, "low": None,
+                     "close": None, "volume": None},
+                    {"datetime": "2024-01-02", "open": "10.0", "high": "11.0", "low": "9.0",
+                     "close": "10.5", "volume": "100"},
+                ], "status": "ok"}
 
-    def test_parse_skips_null_rows(self):
-        history = parse_chart("AAPL", self.payload())
+    def test_parse_orders_oldest_first_and_skips_incomplete_rows(self):
+        history = parse_time_series("AAPL", self.payload())
         self.assertEqual(history.dates, ["2024-01-02", "2024-01-04"])
         self.assertEqual(history.closes, [10.5, 12.5])
-        self.assertEqual(history.name, "Apple Inc.")
+        self.assertEqual(history.volumes, [100.0, 300.0])
         self.assertEqual(history.session_fraction, 1.0)
 
-    def test_parse_error_payload(self):
+    def test_parse_empty_payload(self):
         with self.assertRaises(DataError):
-            parse_chart("NOPE", {"chart": {"result": None, "error": {"description": "No data found"}}})
+            parse_time_series("NOPE", {"values": [], "status": "ok"})
 
-    def test_session_fraction_mid_session(self):
-        import time
-        now = int(time.time())
-        start, end = now - 3600, now + 3 * 3600
-        payload = self.payload(
-            regularMarketTime=now,
-            currentTradingPeriod={"regular": {"start": start, "end": end}},
-        )
-        payload["chart"]["result"][0]["timestamp"][-1] = start
-        self.assertAlmostEqual(parse_chart("AAPL", payload).session_fraction, 0.25)
+    def fetch_with(self, *responses):
+        """Run fetch_history against canned API responses."""
+        import io, json, os, urllib.error
+        from unittest import mock
+        from trader import data
+        queue = list(responses)
+        def fake_urlopen(request, timeout=0):
+            self.assertEqual(request.get_header("Authorization"), "apikey test-key")
+            self.assertNotIn("test-key", request.full_url)
+            body = queue.pop(0)
+            status = body.get("code", 200)
+            raw = io.BytesIO(json.dumps(body).encode())
+            if status != 200:
+                raise urllib.error.HTTPError(request.full_url, status, "error", {}, raw)
+            return raw
+        with mock.patch.dict(os.environ, {"TWELVE_DATA_API_KEY": "test-key"}), \
+             mock.patch.object(data.urllib.request, "urlopen", fake_urlopen), \
+             mock.patch.object(data.time, "sleep") as sleep:
+            return data.fetch_history("AAPL"), sleep
 
-    def test_session_fraction_after_close(self):
-        payload = self.payload(
-            regularMarketTime=1704402000,
-            currentTradingPeriod={"regular": {"start": 1704378600, "end": 1704402000}},
-        )
-        self.assertEqual(parse_chart("AAPL", payload).session_fraction, 1.0)
+    def test_fetch_success(self):
+        history, _ = self.fetch_with(self.payload())
+        self.assertEqual(history.closes[-1], 12.5)
+
+    def test_fetch_waits_out_the_per_minute_limit(self):
+        limit = {"code": 429, "status": "error",
+                 "message": "You have run out of API credits for the current minute."}
+        history, sleep = self.fetch_with(limit, self.payload())
+        self.assertEqual(history.closes[-1], 12.5)
+        self.assertEqual(sleep.call_count, 1)
+
+    def test_fetch_rejected_key(self):
+        with self.assertRaises(ApiKeyError):
+            self.fetch_with({"code": 401, "status": "error", "message": "apikey is incorrect"})
+
+    def test_fetch_unknown_symbol(self):
+        with self.assertRaises(DataError) as raised:
+            self.fetch_with({"code": 404, "status": "error", "message": "symbol not found"})
+        self.assertIn("symbol not found", str(raised.exception))
+
+    def test_missing_key(self):
+        import os
+        from unittest import mock
+        from trader import data
+        with mock.patch.dict(os.environ, {"TWELVE_DATA_API_KEY": ""}):
+            with self.assertRaises(ApiKeyError):
+                data.fetch_history("AAPL")
 
 
 class StateAndEmailTests(unittest.TestCase):
@@ -355,6 +394,13 @@ class MarketHoursTests(unittest.TestCase):
         self.assertFalse(market.is_scan_time(15, self.utc(2026, 11, 21, 16, 0)))
         # Summer time: the session starts at 13:30 UTC.
         self.assertTrue(market.is_scan_time(15, self.utc(2026, 7, 15, 13, 30)))
+
+    def test_session_fraction(self):
+        # Monday 23 November 2026: the session is 14:30-21:00 UTC.
+        self.assertEqual(market.session_fraction("2026-11-20", self.utc(2026, 11, 23, 16, 0)), 1.0)
+        self.assertAlmostEqual(market.session_fraction("2026-11-23", self.utc(2026, 11, 23, 16, 7, 30)), 0.25)
+        self.assertEqual(market.session_fraction("2026-11-23", self.utc(2026, 11, 23, 21, 0)), 1.0)
+        self.assertEqual(market.session_fraction("2026-11-23", self.utc(2026, 11, 23, 14, 0)), 0.0)
 
     def test_env_file(self):
         import os

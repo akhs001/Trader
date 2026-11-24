@@ -30,8 +30,11 @@ enabled = true
 # Uptrend = price above the 200-day average and 50-day above 200-day.
 # Pullback = within the last `lookback_days` the low came within
 # `touch_pct` percent of the 20- or 50-day average, or RSI fell below `rsi_below`.
-# Entry = today's price moves above yesterday's high.
+# The dip must be at least `min_depth_atr` ATRs deep, measured from the
+# 20-day high. Raise it to get fewer, deeper pullbacks.
+# Entry = the first day the price moves above the previous day's high.
 lookback_days = 5
+min_depth_atr = 2.0
 touch_pct = 1.0
 rsi_below = 40
 

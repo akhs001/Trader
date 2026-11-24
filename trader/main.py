@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import emailer, market
-from .data import DataError, fetch_history
+from .data import ApiKeyError, DataError, api_key, fetch_history
 from .signals import MIN_BARS, Signal, scan
 from .state import AlertState
 
@@ -76,7 +76,7 @@ def scan_once(args: argparse.Namespace) -> int:
         if len(history.closes) < MIN_BARS:
             note = f"skipped, only {len(history.closes)} days of history"
         print(f"  {symbol:<6} {history.closes[-1]:>10.2f}  {history.dates[-1]}  {note}")
-        time.sleep(0.5)  # stay polite to the data provider
+        time.sleep(0.3)  # stay polite to the data provider
 
     state = AlertState(args.state)
     cooldown = int(config.get("alerts", {}).get("cooldown_days", 5))
@@ -104,7 +104,9 @@ def scan_once(args: argparse.Namespace) -> int:
 
 def run_loop(args: argparse.Namespace) -> None:
     """Scan every few minutes during US market hours until stopped."""
-    emailer.credentials()  # fail now, not at the first signal, if email is not set up
+    # Fail now, not at the first scan or signal, if the setup is incomplete.
+    api_key()
+    emailer.credentials()
     print("Trader bot is running. Leave this window open; press Ctrl+C to stop.")
     waiting = False
     while True:
@@ -117,6 +119,8 @@ def run_loop(args: argparse.Namespace) -> None:
                 scan_once(args)
             except smtplib.SMTPAuthenticationError:
                 print(f"ERROR: {GMAIL_LOGIN_HELP}")
+            except ApiKeyError as error:
+                print(f"ERROR: {error}")
             except Exception as error:  # keep running through e.g. a network outage
                 print(f"Scan failed, will retry: {error}")
             print(f"Next scan in {interval} minutes.")
@@ -159,7 +163,7 @@ if __name__ == "__main__":
         sys.exit(main())
     except KeyboardInterrupt:
         print("\nStopped.")
-    except emailer.EmailConfigError as error:
+    except (emailer.EmailConfigError, ApiKeyError) as error:
         print(f"ERROR: {error}")
         sys.exit(2)
     except smtplib.SMTPAuthenticationError:

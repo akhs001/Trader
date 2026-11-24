@@ -110,7 +110,7 @@ def _plain_text(signals: list[Signal]) -> str:
             )
             plan = f"  {levels}\n  {_plan_note(s, len(group) > 1)}\n"
         blocks.append(
-            f"{s.symbol} ({s.name})\n"
+            f"{_heading(s)}\n"
             f"  Price: {s.price:.2f} ({s.change_pct:+.2f}% today, {s.date})\n"
             f"{plan}{reasons}\n{facts}\n"
             f"  Chart: {_chart_url(s.symbol)}"
@@ -154,7 +154,7 @@ def _html(signals: list[Signal]) -> str:
         cards.append(f"""
 <div style="border:1px solid #dadce0;border-radius:8px;padding:16px;margin:0 0 14px">
   <div style="font-size:20px;font-weight:700;color:#202124">{escape(s.symbol)}
-    <span style="font-size:14px;font-weight:400;color:#5f6368">{escape(s.name)}</span></div>
+    <span style="font-size:14px;font-weight:400;color:#5f6368">{escape(s.name if s.name != s.symbol else "")}</span></div>
   <div style="font-size:16px;color:#202124;margin:2px 0 0">{s.price:.2f}
     <span style="color:{color}">{s.change_pct:+.2f}%</span>
     <span style="font-size:12px;color:#5f6368">&nbsp;{escape(s.date)}</span></div>
@@ -168,6 +168,12 @@ def _html(signals: list[Signal]) -> str:
 {''.join(cards)}
 <p style="font-size:12px;line-height:1.5;color:#80868b">{escape(DISCLAIMER)}</p>
 </div></body></html>"""
+
+
+def _heading(signal: Signal) -> str:
+    if signal.name and signal.name != signal.symbol:
+        return f"{signal.symbol} ({signal.name})"
+    return signal.symbol
 
 
 def _chart_url(symbol: str) -> str:

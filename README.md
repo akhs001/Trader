@@ -6,12 +6,11 @@ when one shows a possible entry. It only alerts; it never places trades.
 
 ## Signals
 
-All signals use daily candles from Yahoo Finance. During market hours today's
-unfinished candle is included, so the bot reacts to the current price.
+All signals use daily candles from [Twelve Data](https://twelvedata.com).
 
 | Signal | Fires when |
 | --- | --- |
-| Trend pullback | The stock is in an uptrend (above its 200-day average), dipped to its 20- or 50-day average or to RSI below 40 in the last 5 days, and now trades above yesterday's high. |
+| Trend pullback | The stock is in an uptrend (above its 200-day average), dipped at least 2 ATR to its 20- or 50-day average or to RSI below 40 in the last 5 days, and now trades above yesterday's high for the first time. |
 | Breakout | Price moves above its 20-day high on at least 1.5x average volume. |
 | Oversold bounce | RSI(14) was below 30 yesterday and is back above it. |
 | Moving-average cross | The 20-day average crosses above the 50-day average. |
@@ -46,12 +45,14 @@ stays quiet for `cooldown_days` (default 5).
    needs installing.
 2. **Download this project** to your computer: on GitHub, *Code → Download
    ZIP*, then unzip it.
-3. **Create a Gmail app password.** Turn on 2-Step Verification for your
+3. **Get a free Twelve Data API key.** Sign up at <https://twelvedata.com>
+   and copy the API key from your dashboard.
+4. **Create a Gmail app password.** Turn on 2-Step Verification for your
    Google account, then create a password at
    <https://myaccount.google.com/apppasswords>. It is 16 letters long.
-4. **Add your email details.** Copy `.env.example` to a new file named `.env`
-   in the same folder and fill in your Gmail address and the app password.
-5. **Edit `watchlist.txt`** with your own tickers, one per line.
+5. **Add your details.** Copy `.env.example` to a new file named `.env` in the
+   same folder and fill in the API key, your Gmail address and the app password.
+6. **Edit `watchlist.txt`** with your own tickers, one per line.
 
 ## Running
 
@@ -71,8 +72,10 @@ time and waits quietly outside those hours. Your computer has to be on and
 awake for it to work. Changes to `watchlist.txt` and `config.toml` are picked
 up at the next scan without restarting.
 
-Yahoo Finance blocks requests from cloud servers (GitHub Actions and similar),
-which is why the bot runs from a home connection.
+The bot uses one Twelve Data request per stock per scan. The free plan limits
+requests per minute and per day: with a long watchlist the bot pauses when it
+reaches the per-minute limit, and if you run out for the day, shorten the
+watchlist or raise `interval_minutes` in `config.toml`.
 
 ## Tests
 

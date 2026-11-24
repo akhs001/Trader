@@ -166,11 +166,20 @@ def _trend_pullback(ctx: _Context, settings: dict) -> list[_Found]:
     lookback = int(settings.get("lookback_days", 5))
     touch = 1 + float(settings.get("touch_pct", 1.0)) / 100
     rsi_below = float(settings.get("rsi_below", 40))
+    min_depth_atr = float(settings.get("min_depth_atr", 2.0))
 
     if ctx.sma200[-1] is None or len(ctx.close) < lookback + 2:
         return []
     uptrend = ctx.close[-1] > ctx.sma200[-1] and ctx.sma50[-1] > ctx.sma200[-1]
     if not uptrend or ctx.close[-1] <= ctx.high[-2]:
+        return []
+    # Only the first day of the turn counts, not every up day that follows.
+    if ctx.close[-2] > ctx.high[-3]:
+        return []
+    # A real dip, not just an uptrend drifting along its average.
+    pullback_low = min(ctx.low[-1 - lookback :])
+    depth = max(ctx.high[-21:-1]) - pullback_low
+    if ctx.atr[-1] is None or depth < min_depth_atr * ctx.atr[-1]:
         return []
 
     # Did the stock pull back on any of the days just before today?
@@ -189,7 +198,7 @@ def _trend_pullback(ctx: _Context, settings: dict) -> list[_Found]:
         "Trend pullback",
         f"Uptrend (above the 200-day average) pulled back to {pulled_back_to} "
         f"and is now trading above yesterday's high of {ctx.high[-2]:.2f}.",
-        min(ctx.low[-1 - lookback :]),
+        pullback_low,
         "the pullback low",
     )]
 

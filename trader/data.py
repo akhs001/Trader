@@ -1,24 +1,28 @@
-"""Daily price history from Yahoo Finance's public chart endpoint."""
+"""Daily price history from the Twelve Data API (https://twelvedata.com)."""
 
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 
-HOSTS = ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
-USER_AGENT = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
-)
+from . import market
+
+API_URL = "https://api.twelvedata.com/time_series"
+BARS = 400  # enough history for the 200-day average to settle
 
 
 class DataError(Exception):
-    pass
+    """Prices for one stock could not be read."""
+
+
+class ApiKeyError(Exception):
+    """The Twelve Data API key is missing or rejected; no stock can be read."""
 
 
 @dataclass
@@ -36,81 +40,73 @@ class History:
     session_fraction: float = 1.0
 
 
-def fetch_history(symbol: str, range_: str = "2y", retries: int = 3) -> History:
-    path = f"/v8/finance/chart/{urllib.parse.quote(symbol)}?range={range_}&interval=1d"
-    last_error: Exception | str | None = None
-    for attempt in range(retries):
-        host = HOSTS[attempt % len(HOSTS)]
-        request = urllib.request.Request(
-            f"https://{host}{path}", headers={"User-Agent": USER_AGENT}
+def api_key() -> str:
+    key = os.environ.get("TWELVE_DATA_API_KEY", "").strip()
+    if not key:
+        raise ApiKeyError(
+            "Price data is not set up: put TWELVE_DATA_API_KEY in the .env file. "
+            "See README.md."
         )
+    return key
+
+
+def fetch_history(symbol: str, retries: int = 3) -> History:
+    query = urllib.parse.urlencode(
+        {"symbol": symbol, "interval": "1day", "outputsize": BARS, "order": "asc"}
+    )
+    request = urllib.request.Request(
+        f"{API_URL}?{query}", headers={"Authorization": f"apikey {api_key()}"}
+    )
+    last_error: object = None
+    for attempt in range(retries):
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                return parse_chart(symbol, json.load(response))
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.load(response)
         except urllib.error.HTTPError as error:
-            if error.code == 404:
-                raise DataError(f"{symbol}: unknown ticker") from error
-            last_error = error
-            if error.code == 429:
-                last_error = "Yahoo is refusing requests from this network (HTTP 429)"
+            # Twelve Data describes the problem in a JSON body.
+            try:
+                payload = json.load(error)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload = {"status": "error", "code": error.code, "message": str(error)}
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
             last_error = error
-        time.sleep(2 * (attempt + 1))
+            time.sleep(2 * (attempt + 1))
+            continue
+
+        if payload.get("status") != "error":
+            return parse_time_series(symbol, payload)
+        code, message = payload.get("code"), str(payload.get("message", "unknown error"))
+        if code == 401:
+            raise ApiKeyError(f"Twelve Data rejected the API key: {message}")
+        if code == 429 and "minute" in message and attempt < retries - 1:
+            # The free plan allows a few requests per minute; wait for the next one.
+            wait = 61 - datetime.now().second
+            print(f"  (Twelve Data's per-minute limit reached, waiting {wait}s)")
+            time.sleep(wait)
+            continue
+        raise DataError(f"{symbol}: {message}")
     raise DataError(f"{symbol}: could not download prices ({last_error})")
 
 
-def parse_chart(symbol: str, payload: dict) -> History:
-    chart = payload.get("chart") or {}
-    if chart.get("error"):
-        raise DataError(f"{symbol}: {chart['error'].get('description', 'data error')}")
-    results = chart.get("result") or []
-    if not results or not results[0].get("timestamp"):
-        raise DataError(f"{symbol}: no price data returned")
-    result = results[0]
-    meta = result.get("meta", {})
-    quote = result["indicators"]["quote"][0]
-    # Shift timestamps by the exchange's UTC offset to get its local dates.
-    # (Plain arithmetic rather than zoneinfo, which needs extra data on Windows.)
-    offset = int(meta.get("gmtoffset") or 0)
-
+def parse_time_series(symbol: str, payload: dict) -> History:
+    values = payload.get("values") or []
     history = History(
-        symbol=symbol,
-        name=meta.get("shortName") or meta.get("longName") or symbol,
+        symbol=symbol, name=symbol,
         dates=[], opens=[], highs=[], lows=[], closes=[], volumes=[],
     )
-    rows = zip(
-        result["timestamp"], quote["open"], quote["high"], quote["low"],
-        quote["close"], quote["volume"],
-    )
-    for ts, o, h, l, c, v in rows:
-        if None in (o, h, l, c):
-            continue  # Yahoo leaves gaps as nulls (e.g. a candle before the open)
-        history.dates.append(_local_date(ts, offset))
-        history.opens.append(float(o))
-        history.highs.append(float(h))
-        history.lows.append(float(l))
-        history.closes.append(float(c))
-        history.volumes.append(float(v or 0))
+    for row in sorted(values, key=lambda r: r.get("datetime", "")):
+        try:
+            candle = [float(row[field]) for field in ("open", "high", "low", "close")]
+        except (KeyError, TypeError, ValueError):
+            continue  # skip an incomplete candle
+        history.dates.append(str(row["datetime"])[:10])
+        history.opens.append(candle[0])
+        history.highs.append(candle[1])
+        history.lows.append(candle[2])
+        history.closes.append(candle[3])
+        history.volumes.append(float(row.get("volume") or 0))
     if not history.dates:
-        raise DataError(f"{symbol}: no usable price data")
+        raise DataError(f"{symbol}: no price data returned")
 
-    history.session_fraction = _session_fraction(meta, history.dates[-1], offset)
+    history.session_fraction = market.session_fraction(history.dates[-1])
     return history
-
-
-def _local_date(timestamp: int, offset: int) -> str:
-    return datetime.fromtimestamp(timestamp + offset, timezone.utc).date().isoformat()
-
-
-def _session_fraction(meta: dict, last_date: str, offset: int) -> float:
-    regular = (meta.get("currentTradingPeriod") or {}).get("regular") or {}
-    start, end = regular.get("start"), regular.get("end")
-    now = meta.get("regularMarketTime")
-    if not (start and end and now) or end <= start:
-        return 1.0
-    if last_date != _local_date(start, offset) or now >= end:
-        return 1.0
-    # Guard against a clock that says "still open" long after the last trade.
-    if datetime.now(timezone.utc).timestamp() >= end:
-        return 1.0
-    return min(max((now - start) / (end - start), 0.0), 1.0)
