@@ -548,7 +548,7 @@ def _dip(view: _View, settings: dict) -> list[_Found]:
     if settings.get("leaders_only", True) and not view.trending():
         return []  # dips in leaders recovered best in testing
     exit_average = int(settings.get("exit_average", 10))
-    common = dict(stop_atr=float(settings.get("stop_atr", 3.0)), exit=("recover", exit_average))
+    common = dict(stop_atr=float(settings.get("stop_atr", 2.0)), exit=("recover", exit_average))
     reading = view.real_rsi(today)
     if view.short:
         return [_Found(

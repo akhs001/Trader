@@ -28,7 +28,7 @@ before being made a default. Three principles apply to every strategy:
 
 | Strategy | Entry | SL | Exit |
 | --- | --- | --- | --- |
-| **Dip in a leader** (Larry Connors' 2-day RSI, restricted to leaders) | A leader sells off sharply for a day or two: RSI(2) falls below 10. | 3 ATR below the entry. | The first close back above the 10-day average. That average is the TP shown. |
+| **Dip in a leader** (Larry Connors' 2-day RSI, restricted to leaders) | A leader sells off sharply for a day or two: RSI(2) falls below 10. | 2 ATR below the entry. | The first close back above the 10-day average. That average is the TP shown. |
 | **Gap on heavy volume** (the drift after news or earnings) | The stock opens at least 1.5 ATR above yesterday's close on at least twice its 50-day average volume, never fills the gap, and closes in the upper half of the day's range. | Just below the gap day's low. | The first close below the low of the previous 20 days. |
 
 ### Unproven strategies (off; run when you pick one by name)
@@ -52,13 +52,18 @@ with the same stop and exit.
   (around +0.25R per trade either way). In that period most of the profit came
   from holding rising stocks with a stop and a trailing exit, not from the
   entry signal. That is why those three are marked unproven.
-- **Dip in a leader** made 7,100 trades with 70% winners, about +0.43% per
-  trade in 5 days, against +0.14% for a random day in the same stocks. It wins
-  often and small, and its stop is far away by design.
+- **Dip in a leader** made 7,300 trades with 66% winners, about +0.36% per
+  trade in 4 days, against +0.14% in 2 days for a random day in the same
+  stocks. It wins often and small: the target is the nearby average (about
+  2.5% away on average) while the stop is about 5% away, so it has to keep
+  winning about two times in three. A stop of 3 ATR won 70% of the time, and
+  one of 1 ATR only 51%.
 - **Gap on heavy volume** made 1,400 trades with only 30% winners, but large
   ones: about +3.0% per trade over a month, roughly twice the random-entry
   result per day held.
-- **No short form made money**, with or without the market filter.
+- **No short form had a reliable edge**, with or without the market filter.
+  The short form of the dip (a sharp bounce in a falling stock) about broke
+  even over the nine years and lost heavily in the first five.
 - **Every long signal did worse while the market was below its 200-day
   average.**
 

@@ -155,8 +155,8 @@ class StrategyTests(unittest.TestCase):
         plan = find(history, "dip").plan
         atr = indicators.atr(history.highs, history.lows, history.closes)[-1]
         average = indicators.sma(history.closes, 10)[-1]
-        self.assertAlmostEqual(plan.entry - plan.stop, 3 * atr)
-        self.assertEqual(plan.stop_basis, "3 ATR below entry")
+        self.assertAlmostEqual(plan.entry - plan.stop, 2 * atr)
+        self.assertEqual(plan.stop_basis, "2 ATR below entry")
         self.assertEqual(len(plan.targets), 1)
         self.assertAlmostEqual(plan.targets[0], average)
         self.assertGreater(plan.targets[0], plan.entry)
@@ -359,6 +359,7 @@ class ShortTests(unittest.TestCase):
         message = emailer.build_message(signals, "me@example.com", "me@example.com")
         self.assertEqual(message["Subject"], "Entry alert: TEST short")
         self.assertIn("TEST (Test Corp) - SHORT", message.get_body(("plain",)).get_content())
+        self.assertIn("Short entries had no reliable edge in testing", message.get_body(("plain",)).get_content())
         self.assertIn(">SHORT</span>", message.get_body(("html",)).get_content())
 
 
@@ -852,6 +853,8 @@ class StateAndEmailTests(unittest.TestCase):
         self.assertNotIn("TP1", text)
         self.assertIn("TP is where the 10-day average stands now", text)
         self.assertIn("Take the profit when a day closes back above the 10-day average.", text)
+        self.assertRegex(text, r"This plan risks \d+\.\d\d to make about \d+\.\d\d per share")
+        self.assertNotIn("Short entries", text)
 
     def test_watchlist_parsing(self):
         with tempfile.TemporaryDirectory() as tmp:

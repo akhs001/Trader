@@ -37,10 +37,12 @@ short = true
 enabled = true
 # Dip in a leader. A stock in a strong uptrend (see "leader" below) has a
 # sharp two-day sell-off: RSI(2) falls below `rsi_level`.
-# SL = `stop_atr` ATRs below the entry.
+# SL = `stop_atr` ATRs below the entry. The target (the average) is close, so
+# this setup wins often and small. A wider stop wins more often but risks more
+# per trade: in testing 2 ATR won 66% of trades and 3 ATR 70%.
 # Exit = the first close back above the `exit_average`-day average.
 rsi_level = 10
-stop_atr = 3.0
+stop_atr = 2.0
 exit_average = 10
 # Only dips in leaders. false = any stock above its 200-day average.
 leaders_only = true

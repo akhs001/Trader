@@ -181,6 +181,12 @@ def plan_note(signal: Signal, several_signals: bool) -> str:
         note += ", for reference: the exit rule decides." if plan.exit_text else "."
     if plan.exit_text:
         note += f" {plan.exit_text}"
+    reward = abs(plan.targets[0] - plan.entry)
+    if plan.exit_kind == "recover" and reward:
+        note += (f" This plan risks {plan.risk:.2f} to make about {reward:.2f} per share: "
+                 "it has to win much more often than it loses.")
+    if plan.direction == "short":
+        note += " Short entries had no reliable edge in testing; treat this one with extra caution."
     if several_signals:
         note += f" Plan based on the {signal.title.lower()} signal."
     return note
