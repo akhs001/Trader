@@ -69,8 +69,8 @@ def scan_once(args: argparse.Namespace) -> int:
     up = market_trend(benchmark)
     if up:
         state_now = "above" if list(up.values())[-1] else "below"
-        print(f"  The market is {state_now} its 200-day average: "
-              f"{'long' if state_now == 'above' else 'short'} entries only.")
+        print(f"  The market is {state_now} its 200-day average"
+              + ("." if state_now == "above" else ": dip entries are paused, gap entries are still shown."))
     # Shorts lost money in testing, so the console looks for longs unless asked.
     direction = "both" if args.shorts else "long"
     results = check_watchlist(symbols, config, on_result=show, notify=notify,

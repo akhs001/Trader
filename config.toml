@@ -3,9 +3,11 @@
 # and put only the settings you want to change in it, for example:
 #
 #   [market]
-# Trade with the market: look for long entries only while the S&P 500 is above
-# its 200-day average, and for short entries only while it is below. In testing
-# every long signal did worse in a falling market.
+# The market filter: a strategy that uses it looks for long entries only while
+# the S&P 500 is above its 200-day average, and for shorts only while it is
+# below. Each strategy has its own `market_filter` setting. In testing, dips
+# lost money when the market was below the line, but gaps did not, so the gap
+# strategy ignores the filter. false here switches it off for every strategy.
 filter = true
 # The fund that stands for the market.
 symbol = "SPY"
@@ -43,6 +45,7 @@ enabled = true
 # Exit = the first close back above the `exit_average`-day average.
 rsi_level = 10
 stop_atr = 2.0
+market_filter = true
 exit_average = 10
 # Only dips in leaders. false = any stock above its 200-day average.
 leaders_only = true
@@ -57,6 +60,7 @@ enabled = true
 gap_atr = 1.5
 volume_ratio = 2.0
 exit_low = 20
+market_filter = false
 
 # --- Classic rules that did NOT beat a random entry in testing; off ----------
 # They still run when you pick one by name on the page.

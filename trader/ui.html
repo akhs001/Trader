@@ -384,8 +384,8 @@ function render() {
   const marketNote = $("market-note");
   if (scan.market) {
     marketNote.textContent = scan.market.up
-      ? "The market (" + scan.market.symbol + ") is above its 200-day average, so Trader looks for long entries."
-      : "The market (" + scan.market.symbol + ") is below its 200-day average, so Trader shows no long entries: in testing every long signal did worse in a falling market.";
+      ? "The market (" + scan.market.symbol + ") is above its 200-day average: all long strategies are active."
+      : "The market (" + scan.market.symbol + ") is below its 200-day average: dip entries are paused, because in testing they lost money in a falling market. Gap entries are still shown.";
     marketNote.className = "market-note" + (scan.market.up ? "" : " down");
     marketNote.style.display = "";
   } else {
@@ -571,8 +571,8 @@ function renderScreen() {
   const summary = "Checked " + plural(result.scanned, "stock") + " at " + clock(result.finished) +
     (result.failed ? "; " + result.failed + " had no prices." : ".");
   const marketLine = !result.market ? "" : result.market.up
-    ? " The market (" + result.market.symbol + ") is above its 200-day average, so long entries are allowed."
-    : " The market (" + result.market.symbol + ") is below its 200-day average, so no long entries are shown.";
+    ? " The market (" + result.market.symbol + ") is above its 200-day average: all long strategies are active."
+    : " The market (" + result.market.symbol + ") is below its 200-day average: dip entries are paused, gap entries are still shown.";
   if (!result.hits.length) {
     box.append(el("section", {class: "card"}, el("div", {class: "empty", text: summary + " No entries right now." + marketLine})));
     return;
@@ -771,7 +771,7 @@ function renderBacktest() {
       (options.exit === "rule" ? "by its strategy's exit rule" : "at " + options.exit.toUpperCase()) +
       (options.hold ? ", or after " + holdLabel(options, options.hold) + (hours ? " of market time" : "") : "") +
       (hours ? ". Trades are followed on hourly prices." : ".")}),
-    el("li", {text: "The market filter is applied: no long trades are opened while the market is below its 200-day average, and no shorts while it is above."}),
+    el("li", {text: "The market filter is applied as in live checks: strategies that use it (all but the gap) open no long trades while the market is below its 200-day average, and no shorts while it is above."}),
     el("li", {text: "Each trade risks " + options.risk_pct + "% of the budget at that moment: that is what it loses at its SL. A position is never larger than the budget, and fractions of a share are allowed."}),
     el("li", {text: "When SL and TP are both touched in the same " + (hours ? "hour" : "day") + ", the SL is assumed to come first."}),
     el("li", {text: "One trade at a time per strategy and side. Commissions, slippage and borrowing costs for shorts are not included."}),

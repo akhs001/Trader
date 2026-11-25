@@ -241,22 +241,34 @@ class StrategyTests(unittest.TestCase):
 
 
 class MarketFilterTests(unittest.TestCase):
-    def test_longs_only_in_a_rising_market(self):
+    def test_filtered_strategies_go_long_only_in_a_rising_market(self):
         history = flat_breakout()
-        self.assertIn("gap_up", kinds(history, benchmark=market_like(history, rising=True)))
-        self.assertEqual(kinds(history, benchmark=market_like(history, rising=False)), set())
+        self.assertEqual(kinds(history, benchmark=market_like(history, rising=True)), {"gap_up", "channel_breakout"})
+        # In a falling market the breakout waits; the gap does not use the filter.
+        self.assertEqual(kinds(history, benchmark=market_like(history, rising=False)), {"gap_up"})
         # Without a benchmark the filter cannot judge and lets the signal through.
-        self.assertIn("gap_up", kinds(history))
+        self.assertIn("channel_breakout", kinds(history))
 
-    def test_shorts_only_in_a_falling_market(self):
+    def test_filtered_strategies_go_short_only_in_a_falling_market(self):
         history = mirrored(flat_breakout())
-        self.assertIn("gap_down", kinds(history, benchmark=market_like(history, rising=False)))
-        self.assertEqual(kinds(history, benchmark=market_like(history, rising=True)), set())
+        self.assertEqual(kinds(history, benchmark=market_like(history, rising=False)), {"gap_down", "channel_breakdown"})
+        self.assertEqual(kinds(history, benchmark=market_like(history, rising=True)), {"gap_down"})
 
-    def test_filter_can_be_switched_off(self):
+    def test_filter_settings(self):
         history = flat_breakout()
-        config = {**CONFIG, "market": {"filter": False}}
-        self.assertIn("gap_up", kinds(history, config, market_like(history, rising=False)))
+        falling = market_like(history, rising=False)
+        everything_off = {**CONFIG, "market": {"filter": False}}
+        self.assertEqual(kinds(history, everything_off, falling), {"gap_up", "channel_breakout"})
+        gap_filtered = {"signals": {**CONFIG["signals"], "gap": {"enabled": True, "market_filter": True}}}
+        self.assertEqual(kinds(history, gap_filtered, falling), set())
+
+    def test_dips_wait_for_the_market(self):
+        history = dip_setup()
+        slower = lambda rising: make_history(
+            [100 * 1.0005 ** i for i in range(len(history.dates))] if rising
+            else [300 * 0.9995 ** i for i in range(len(history.dates))])
+        self.assertIn("dip", kinds(history, benchmark=slower(True)))
+        self.assertNotIn("dip", kinds(history, benchmark=slower(False)))
 
     def test_a_leader_must_not_be_weaker_than_the_market(self):
         history = dip_setup()
@@ -402,7 +414,7 @@ class HourlyTests(unittest.TestCase):
         days = sorted({stamp[:10] for stamp in history.dates})
         falling = make_history([300 - i * 0.1 for i in range(260)])
         falling.dates = [(date.fromisoformat(days[-1]) - timedelta(days=259 - i)).isoformat() for i in range(260)]
-        self.assertEqual(kinds(history, benchmark=falling), set())
+        self.assertEqual(kinds(history, benchmark=falling), {"gap_up"})   # the breakout waits
 
     def test_change_is_measured_from_the_previous_day(self):
         from trader.signals import day_change
@@ -567,7 +579,7 @@ class BacktestTests(unittest.TestCase):
     def test_market_filter_applies_to_past_days(self):
         from trader import backtest
         history = flat_breakout()
-        options = backtest.Options(strategy="gap", years=0.1)
+        options = backtest.Options(strategy="channel_breakout", years=0.1)
         self.assertTrue(backtest.backtest_stock(history, {}, options, benchmark=market_like(history, True)))
         self.assertEqual(backtest.backtest_stock(history, {}, options, benchmark=market_like(history, False)), [])
 
@@ -1099,6 +1111,7 @@ class AppTests(unittest.TestCase):
                 return history
             return fetch
 
+        self.call("/api/selection", {"strategy": "channel_breakout", "direction": "long"})
         with mock.patch.object(scanner, "fetch_history", prices(True)):
             scan = self.check(email=False)
         self.assertEqual(scan["market"], {"symbol": "SPY", "up": True})

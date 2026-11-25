@@ -11,11 +11,11 @@ The entry rules come from what professional and systematic traders publish,
 and each one was then tested on nine years of prices for the S&P 500 members
 before being made a default. Three principles apply to every strategy:
 
-- **Trade with the market.** Trader looks for long entries only while the
-  S&P 500 (the SPY fund) is above its 200-day average, and for shorts only
-  while it is below. This is the "200-day rule" used by Paul Tudor Jones and
-  in Meb Faber's timing model. When the market is below the line, the page
-  says so and shows no long entries.
+- **Mind the market.** The page shows whether the S&P 500 (the SPY fund) is
+  above its 200-day average, the "200-day rule" used by Paul Tudor Jones and
+  in Meb Faber's timing model. Strategies that tested worse against the
+  market use it as a filter: they look for longs only above the line and for
+  shorts only below it. Dips use the filter; gaps do not.
 - **Buy leaders.** Most strategies need the stock to pass Mark Minervini's
   *trend template* first: price above its 50-, 150- and 200-day averages,
   those averages stacked in that order, the 200-day rising, price within 25%
@@ -64,8 +64,17 @@ with the same stop and exit.
 - **No short form had a reliable edge**, with or without the market filter.
   The short form of the dip (a sharp bounce in a falling stock) about broke
   even over the nine years and lost heavily in the first five.
-- **Every long signal did worse while the market was below its 200-day
-  average.**
+- **The market filter helps some strategies and not others.** Dips bought
+  while the market was below its 200-day average lost money (-0.08% per trade
+  against +0.36% above the line). Gaps did as well below the line as above
+  it. And simply staying out of the index below the line would have cut its
+  return from 14% to 7% a year over this period, because every fall was
+  followed by a fast recovery; it did reduce the deepest loss.
+- **Nothing tested beat holding the index after allowing for risk.** The S&P
+  500 fund itself returned about 14% a year over the period. A monthly
+  portfolio of the ten strongest stocks of the past year returned more (about
+  20% a year) with deeper losses along the way and a weak first half; the
+  twenty weakest returned 3% a year.
 
 Read these numbers with care. The test used today's index members, which
 leaves out companies that failed and so flatters long trades. It ignores

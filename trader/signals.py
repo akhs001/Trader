@@ -44,6 +44,9 @@ STRATEGIES = {
 # the first two beat entering on a random day; these three did not. They are
 # left out of "all strategies" and run only when picked by name or switched on.
 UNPROVEN = {"base_breakout", "pullback", "channel_breakout"}
+# In the same test, gaps did as well when the market was below its 200-day
+# average as above it, so the market filter is not applied to them by default.
+MARKET_NEUTRAL = {"gap"}
 STOP_BUFFER_ATR = 0.25  # room left beyond the stop level, in ATRs
 
 
@@ -180,15 +183,17 @@ class Analysis:
             if not cfg.get(direction, True):
                 continue
             short = direction == "short"
-            # Trade with the market: no longs in a falling market, no shorts in a rising one.
-            if use_market and market_up is not None and market_up == short:
-                continue
+            # Against the market: a long while it is falling, a short while it is rising.
+            against_market = use_market and market_up is not None and market_up == short
             view = market.view(end)
             # Stronger than the market for longs, weaker for shorts. None when unknown.
             view.leading = None if strength is None else (strength < 0 if short else strength > 0)
             for name, detector in DETECTORS:
                 settings = cfg.get(name, {})
                 if name != only and (only or not settings.get("enabled", name not in UNPROVEN)):
+                    continue
+                # Strategies that tested worse against the market wait for it to turn.
+                if against_market and settings.get("market_filter", name not in MARKET_NEUTRAL):
                     continue
                 for found in detector(view, settings):
                     signals.append(Signal(
