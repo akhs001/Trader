@@ -40,6 +40,9 @@
   .tab { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none;
          padding: 8px 14px; font-weight: 600; color: var(--muted); margin-bottom: -1px; }
   .tab:hover { color: var(--text); }
+  .tabs { overflow-x: auto; }
+  .tab { white-space: nowrap; }
+  @media (max-width: 480px) { .tab { padding: 8px 9px; } }
   .tab.on { color: var(--text); border-bottom-color: var(--accent); }
   .filters { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-bottom: 16px; font-size: 14px; color: var(--muted); }
   .filters label { display: flex; align-items: center; gap: 8px; }
@@ -93,6 +96,7 @@
   .side { font-size: 12px; font-weight: 700; letter-spacing: .05em; color: #fff; padding: 2px 9px;
           border-radius: 999px; background: var(--up); align-self: center; }
   .side.short { background: var(--down); }
+  .side.neutral { background: var(--soft); color: var(--muted); }
   @media (prefers-color-scheme: dark) { .side { color: #0b1220; } }
   .price { font-size: 16px; font-variant-numeric: tabular-nums; }
   .up { color: var(--up); } .down { color: var(--down); }
@@ -150,6 +154,7 @@
   <nav class="tabs" role="tablist">
     <button class="tab" id="tabbtn-entries" data-tab="entries" role="tab">Entries</button>
     <button class="tab" id="tabbtn-scanner" data-tab="scanner" role="tab">Scanner</button>
+    <button class="tab" id="tabbtn-momentum" data-tab="momentum" role="tab">Momentum</button>
     <button class="tab" id="tabbtn-backtest" data-tab="backtest" role="tab">Backtest</button>
   </nav>
 
@@ -222,6 +227,46 @@
       <div class="status" id="sc-status"></div>
     </section>
     <div id="sc-results"></div>
+  </div>
+
+  <div id="tab-momentum" hidden>
+    <section class="card">
+      <div class="filters">
+        <label>Index
+          <select id="mo-universe">
+            <option value="sp500">S&amp;P 500</option>
+            <option value="nasdaq100">Nasdaq 100</option>
+            <option value="dowjones">Dow Jones 30</option>
+          </select>
+        </label>
+        <label>Hold
+          <select id="mo-top">
+            <option value="5">5 stocks</option>
+            <option value="10" selected>10 stocks</option>
+            <option value="20">20 stocks</option>
+          </select>
+        </label>
+        <label>Budget $
+          <input type="number" id="mo-budget" value="10000" min="1" step="100" inputmode="decimal">
+        </label>
+      </div>
+      <div class="controls">
+        <button class="primary" id="mo-run">Build this month's list</button>
+      </div>
+      <div class="bar" id="mo-bar"><span></span></div>
+      <div class="status" id="mo-status"></div>
+    </section>
+    <div id="mo-results"></div>
+    <section class="card" style="margin-top:16px">
+      <h3>How this works, and what to expect</h3>
+      <ul class="notes" style="margin-top:8px">
+        <li>Once a month, build the list. It ranks the index by each stock's price change over the last 12 months and takes the strongest.</li>
+        <li>Hold the listed stocks in equal amounts. Sell what has dropped off the list, buy what is new, then press the save button so Trader remembers your portfolio.</li>
+        <li>The record below the list compares every month you held with the market over the same days. It only starts when you first save.</li>
+        <li>In a test on the S&amp;P 500 from 2018 to 2026, the top 10 returned about 20% a year against 14% for the index fund, but with deeper losses along the way (32% against 24%) and a weak first half. It is a higher-risk way to hold stocks, not a proven edge.</li>
+        <li>Returns shown are price changes; dividends, commissions and taxes are left out.</li>
+      </ul>
+    </section>
   </div>
 
   <div id="tab-backtest" hidden>
@@ -344,7 +389,8 @@ async function refresh() {
   }
   render();
   // Poll quickly during a check or backtest, and often enough to show automatic checks.
-  const busy = state && (state.scan.running || (state.backtest || {}).running || (state.screen || {}).running);
+  const busy = state && (state.scan.running || (state.backtest || {}).running ||
+    (state.screen || {}).running || (state.momentum || {}).running);
   const pause = !state ? 10000 : busy ? 700 : state.auto.enabled ? 3000 : 10000;
   timer = setTimeout(refresh, pause);
 }
@@ -397,6 +443,7 @@ function render() {
   fillStrategies($("bt-strategy"), state.strategies || []);
   fillStrategies($("sc-strategy"), state.strategies || []);
   renderScannerControls();
+  renderMomentumControls();
   const selection = state.selection || {strategy: "all", direction: "both"};
   if (document.activeElement !== $("strategy")) $("strategy").value = selection.strategy;
   if (document.activeElement !== $("direction")) $("direction").value = selection.direction;
@@ -511,7 +558,7 @@ async function saveSelection() {
 
 // ---- tabs --------------------------------------------------------------------
 
-const TABS = ["entries", "scanner", "backtest"];
+const TABS = ["entries", "scanner", "momentum", "backtest"];
 
 function showTab(name) {
   for (const tab of TABS) {
@@ -613,6 +660,153 @@ function renderScreen() {
   table.append(body);
   box.append(el("section", {class: "card"}, el("div", {class: "table-wrap"}, table),
     el("div", {class: "small", text: summary + marketLine + " Click a ticker to open its chart."})));
+}
+
+// ---- momentum ----------------------------------------------------------------
+
+let momentumRun = null;     // the ranking whose result is on screen
+let momentumResult = null;
+let momentumFormError = "";
+
+function renderMomentumControls() {
+  const run = state.momentum || {running: false, run: 0, total: 0, done: 0};
+  $("mo-run").disabled = run.running || !state.setup.data;
+  $("mo-run").textContent = run.running ? "Ranking…" : "Build this month's list";
+  $("mo-bar").className = "bar" + (run.running ? " on" : "");
+  $("mo-bar").firstElementChild.style.width = run.total ? (100 * run.done / run.total) + "%" : "0";
+  let status = "";
+  if (run.running) status = run.message || ("Read " + run.done + " of " + run.total + " stocks");
+  else if (momentumFormError) status = momentumFormError;
+  else if (run.error) status = run.error;
+  else if (!momentumResult) status = "Ranks a whole index, which takes a minute for the Nasdaq 100 and several for the S&P 500.";
+  $("mo-status").textContent = status;
+  if (!run.running && run.run !== momentumRun) loadMomentum(run.run);
+}
+
+async function loadMomentum(run) {
+  momentumRun = run;
+  if (state.momentum.error) {
+    momentumResult = null;
+  } else {
+    try {
+      momentumResult = (await (await fetch("/api/momentum")).json()).result;
+    } catch (error) { return; }
+  }
+  if (momentumResult) $("mo-status").textContent = "";
+  renderMomentum();
+}
+
+function pct1(value) { return value == null ? "–" : signed(value, 1) + "%"; }
+function tone(value) { return value == null ? "" : value >= 0 ? " up" : " down"; }
+function daysBetween(from, to) { return Math.round((Date.parse(to) - Date.parse(from)) / 86400000); }
+
+function renderMomentum() {
+  const box = $("mo-results");
+  box.replaceChildren();
+  const result = momentumResult;
+  if (!result) return;
+  const budget = Math.max(Number($("mo-budget").value) || 0, 0);
+  const each = budget / result.top;
+  const saved = result.saved;
+  const savedToday = saved && saved.date === result.date;
+
+  box.append(el("h2", {text: "Top " + result.top + " of the " + result.name + " by 12-month return, prices of " + result.date}));
+  const buys = result.picks.filter((row) => row.action === "buy");
+  let summary;
+  if (!saved) {
+    summary = "You have no saved portfolio yet. Buy these " + result.top + " stocks in equal amounts, then save the list.";
+  } else if (savedToday) {
+    summary = "This list is saved as your portfolio. Build it again in about a month.";
+  } else {
+    const days = daysBetween(saved.date, result.date);
+    summary = "Your portfolio was saved on " + saved.date + " (" + plural(days, "day") + " ago). " +
+      (days < 25 ? "A month has not passed yet; this is a preview of the changes. " : "") +
+      "Changes now: sell " + result.sells.length + ", buy " + buys.length + ", keep " + (result.top - buys.length) + ".";
+  }
+  const market = result.market;
+  box.append(el("section", {class: "card"},
+    el("div", {text: summary}),
+    el("div", {class: "small", text: "For comparison, the market (" + market.symbol + ") changed " + pct1(market.year_pct) +
+      " over the same 12 months. " + result.ranked + " stocks of the index had a full year of prices."})));
+
+  const table = el("table", {class: "compact"}, el("thead", {}, el("tr", {},
+    el("th", {class: "num", text: "#"}), el("th", {text: "Stock"}), el("th", {text: "Do"}),
+    el("th", {class: "num", text: "12 months"}), el("th", {class: "num", text: "6 months"}),
+    el("th", {class: "num", text: "1 month"}), el("th", {class: "num", text: "Price"}),
+    el("th", {class: "num", text: "Amount"}), el("th", {class: "num", text: "Shares"}))));
+  const body = el("tbody");
+  for (const row of result.picks) {
+    const action = savedToday || !saved ? (saved ? "Hold" : "Buy") : row.action === "buy" ? "Buy" : "Keep";
+    body.append(el("tr", {},
+      el("td", {class: "num", text: String(row.rank)}),
+      el("td", {class: "sym-cell"}, el("a", {href: "https://finance.yahoo.com/chart/" + encodeURIComponent(row.symbol),
+        target: "_blank", rel: "noopener", text: row.symbol})),
+      el("td", {}, el("span", {class: "side" + (action === "Buy" ? "" : " neutral"), text: action.toUpperCase()})),
+      el("td", {class: "num" + tone(row.year_pct), text: pct1(row.year_pct)}),
+      el("td", {class: "num" + tone(row.half_pct), text: pct1(row.half_pct)}),
+      el("td", {class: "num" + tone(row.month_pct), text: pct1(row.month_pct)}),
+      el("td", {class: "num", text: row.price.toFixed(2)}),
+      el("td", {class: "num", text: money0(each)}),
+      el("td", {class: "num", text: (each / row.price).toFixed(each / row.price < 10 ? 2 : 0)})));
+  }
+  table.append(body);
+  const listCard = el("section", {class: "card", style: "margin-top:12px"}, el("div", {class: "table-wrap"}, table));
+  if (!savedToday) {
+    const save = el("button", {class: "primary", style: "font-size:14px;padding:8px 16px",
+      text: saved ? "I rebalanced: save this list as my portfolio" : "I bought these: save as my portfolio"});
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      const answer = await post("/api/momentum/save");
+      momentumFormError = answer.error || "";
+      refresh();
+    });
+    listCard.append(el("div", {class: "signal"}, save,
+      el("div", {class: "small", style: "margin-top:6px", text: "Trader places no orders. Save only after you have traded, so the record matches what you hold."})));
+  }
+  box.append(listCard);
+
+  if (result.sells.length) {
+    box.append(el("h2", {text: "Sell: no longer in the top " + result.top}));
+    const sells = el("table", {class: "compact"}, el("thead", {}, el("tr", {},
+      el("th", {text: "Stock"}), el("th", {class: "num", text: "Bought at"}), el("th", {class: "num", text: "Price now"}),
+      el("th", {class: "num", text: "Since bought"}), el("th", {text: "Rank now"}))));
+    const sellRows = el("tbody");
+    for (const row of result.sells) {
+      sellRows.append(el("tr", {},
+        el("td", {class: "sym-cell", text: row.symbol}),
+        el("td", {class: "num", text: row.paid.toFixed(2)}),
+        el("td", {class: "num", text: row.price == null ? "–" : row.price.toFixed(2)}),
+        el("td", {class: "num" + tone(row.since_bought_pct), text: pct1(row.since_bought_pct)}),
+        el("td", {text: row.rank ? "#" + row.rank : "left the index"})));
+    }
+    sells.append(sellRows);
+    box.append(el("section", {class: "card"}, el("div", {class: "table-wrap"}, sells)));
+  }
+
+  const track = result.track;
+  if (track && track.periods.length) {
+    box.append(el("h2", {text: "Your record against the market"}));
+    box.append(el("div", {class: "tiles"},
+      tile("Your portfolio", pct1(track.portfolio_pct), track.portfolio_pct >= 0 ? "up" : "down"),
+      tile("The market (" + market.symbol + ")", pct1(track.market_pct), track.market_pct >= 0 ? "up" : "down"),
+      tile("Difference", pct1(track.portfolio_pct - track.market_pct), track.portfolio_pct >= track.market_pct ? "up" : "down")));
+    const record = el("table", {class: "compact"}, el("thead", {}, el("tr", {},
+      el("th", {text: "From"}), el("th", {text: "To"}), el("th", {class: "num", text: "Stocks"}),
+      el("th", {class: "num", text: "Portfolio"}), el("th", {class: "num", text: "Market"}),
+      el("th", {class: "num", text: "Difference"}))));
+    const recordRows = el("tbody");
+    for (const period of track.periods.slice().reverse()) {
+      const gap = period.portfolio_pct - period.market_pct;
+      recordRows.append(el("tr", {},
+        el("td", {text: period.start}), el("td", {text: period.running ? period.end + " (still held)" : period.end}),
+        el("td", {class: "num", text: String(period.stocks)}),
+        el("td", {class: "num" + tone(period.portfolio_pct), text: pct1(period.portfolio_pct)}),
+        el("td", {class: "num" + tone(period.market_pct), text: pct1(period.market_pct)}),
+        el("td", {class: "num" + tone(gap), text: pct1(gap)})));
+    }
+    record.append(recordRows);
+    box.append(el("section", {class: "card", style: "margin-top:12px"}, el("div", {class: "table-wrap"}, record)));
+  }
 }
 
 // ---- backtest ----------------------------------------------------------------
@@ -927,6 +1121,13 @@ $("sc-run").addEventListener("click", async () => {
   screenFormError = result.error || "";
   refresh();
 });
+$("mo-run").addEventListener("click", async () => {
+  $("mo-run").disabled = true;
+  const answer = await post("/api/momentum", {universe: $("mo-universe").value, top: Number($("mo-top").value)});
+  momentumFormError = answer.error || "";
+  refresh();
+});
+$("mo-budget").addEventListener("input", renderMomentum);
 $("bt-hold").addEventListener("change", () => { if (state) renderBacktestControls(); });
 $("bt-run").addEventListener("click", async () => {
   $("bt-run").disabled = true;

@@ -24,7 +24,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import backtest, emailer, market, universe
+from . import backtest, emailer, market, momentum, universe
 from .data import (DataError, SetupError, check_setup, fetch_history, fetch_hourly, fetch_many,
                    source_of)
 from .main import GMAIL_LOGIN_HELP, ROOT, load_env_file
@@ -89,6 +89,9 @@ class App:
         self.backtest_result: dict | None = None
         self.screen = {"running": False, "done": 0, "total": 0, "message": "", "error": "", "run": 0}
         self.screen_result: dict | None = None
+        self.momentum = {"running": False, "done": 0, "total": 0, "message": "", "error": "", "run": 0}
+        self.momentum_result: dict | None = None
+        self.portfolio_path = state_dir / "momentum.json"
 
     # --- what the page shows -------------------------------------------------
 
@@ -107,6 +110,7 @@ class App:
                           "timeframe": "1h" if self.hourly else "1d"},
             "backtest": dict(self.backtest),
             "screen": dict(self.screen),
+            "momentum": dict(self.momentum),
             "universes": [{"id": key, "name": name} for key, (name, _) in universe.UNIVERSES.items()],
             "market": {"open": market.is_scan_time(), "time": now.strftime("%a %H:%M")},
             "setup": self._setup(),
@@ -314,6 +318,96 @@ class App:
         with self.lock:
             self.screen.update(changes)
 
+    # --- the momentum portfolio ----------------------------------------------
+
+    def start_momentum(self, body: dict) -> str:
+        """Start ranking an index by momentum in the background. Returns an error or ''."""
+        market_id = body.get("universe")
+        if universe.UNIVERSES.get(market_id, ("", ""))[1] != "index":
+            return "Choose which index to rank."
+        top = _number(body.get("top"), 10, 3, 50)
+        with self.lock:
+            if self.momentum["running"]:
+                return "A ranking is already running."
+            self.momentum.update(running=True, done=0, total=0, error="",
+                                 message="Loading the list of stocks")
+        threading.Thread(target=self._momentum, args=(market_id, top), daemon=True).start()
+        return ""
+
+    def _momentum(self, market_id: str, top: int) -> None:
+        error = ""
+        try:
+            config = self._config()
+            source = source_of(config)
+            symbols = universe.load(market_id)
+            self._momentum_progress(total=len(symbols), message="")
+            histories = {}
+            for done, (symbol, history) in enumerate(fetch_many(symbols, source), start=1):
+                if not isinstance(history, DataError):
+                    histories[symbol] = history
+                self._momentum_progress(done=done)
+            benchmark_symbol = str(config.get("market", {}).get("symbol", "SPY"))
+            benchmark = fetch_history(benchmark_symbol, source=source)
+            portfolio = momentum.Portfolio(self.portfolio_path)
+            held = portfolio.holdings()
+            # A holding that has left the index still needs today's price to be sold.
+            for symbol in held:
+                if symbol not in histories:
+                    try:
+                        histories[symbol] = fetch_history(symbol, source=source)
+                    except DataError:
+                        pass
+            ranked = momentum.rank({s: h for s, h in histories.items() if s in symbols})
+            if len(ranked) < top:
+                raise DataError("Too few stocks have a full year of prices to build the list.")
+            prices = {symbol: history.closes[-1] for symbol, history in histories.items()}
+            today = benchmark.dates[-1]
+            market_now = benchmark.closes[-1]
+            market_year = momentum.measure(benchmark)
+            result = momentum.plan(ranked, top, held)
+            result.update(
+                universe=market_id, name=universe.UNIVERSES[market_id][0], top=top, date=today,
+                ranked=len(ranked), finished=time.time(),
+                market={"symbol": benchmark_symbol, "price": market_now,
+                        "year_pct": market_year.year_pct if market_year else None},
+                saved=portfolio.current(),
+                track=portfolio.track(prices, market_now, today),
+                # Kept for saving the list as the new portfolio.
+                prices={row["symbol"]: row["price"] for row in result["picks"]} | {
+                    symbol: prices[symbol] for symbol in held if symbol in prices},
+            )
+            self.momentum_result = result
+        except (SetupError, DataError) as problem:
+            error = str(problem)
+        except Exception as problem:  # show the problem on the page instead of dying silently
+            error = f"The ranking failed: {problem}"
+        with self.lock:
+            self.momentum.update(running=False, message="", error=error,
+                                 run=self.momentum["run"] + 1)
+
+    def _momentum_progress(self, **changes) -> None:
+        with self.lock:
+            self.momentum.update(changes)
+
+    def save_momentum(self) -> str:
+        """Record the list on screen as the portfolio now held. Returns an error or ''."""
+        result = self.momentum_result
+        if not result:
+            return "Build the list first."
+        portfolio = momentum.Portfolio(self.portfolio_path)
+        holdings = {row["symbol"]: row["price"] for row in result["picks"]}
+        portfolio.save(result["date"], result["universe"], holdings,
+                       result["market"]["price"], result["prices"])
+        held = portfolio.holdings()
+        for row in result["picks"]:
+            row["action"] = "keep"
+            row["since_bought_pct"] = 0.0
+        result.update(sells=[], saved=portfolio.current(),
+                      track=portfolio.track(result["prices"], result["market"]["price"], result["date"]))
+        with self.lock:
+            self.momentum["run"] += 1  # tells the page to load the result again
+        return "" if held else "Nothing was saved."
+
     # --- backtesting ---------------------------------------------------------
 
     def start_backtest(self, body: dict) -> str:
@@ -511,6 +605,8 @@ def make_handler(app: App):
                 self._json({"result": app.backtest_result})
             elif self.path == "/api/screen":
                 self._json({"result": app.screen_result})
+            elif self.path == "/api/momentum":
+                self._json({"result": app.momentum_result})
             else:
                 self._json({"error": "Not found"}, 404)
 
@@ -556,6 +652,10 @@ def make_handler(app: App):
                 self._json({"error": app.start_backtest(body)})
             elif self.path == "/api/screen":
                 self._json({"error": app.start_screen(body)})
+            elif self.path == "/api/momentum":
+                self._json({"error": app.start_momentum(body)})
+            elif self.path == "/api/momentum/save":
+                self._json({"error": app.save_momentum()})
             elif self.path == "/api/test-email":
                 self._json({"message": app.send_test_email()})
             elif self.path == "/api/quit" and not app.hosted:

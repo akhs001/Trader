@@ -673,6 +673,93 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(report["rows"][0]["name"], "Gap on heavy volume")
 
 
+class MomentumTests(unittest.TestCase):
+    def stock(self, symbol, year_gain, last=100.0, days=300):
+        """A stock that ends at `last` after gaining `year_gain` percent over its final year."""
+        start = last / (1 + year_gain / 100)
+        closes = [start] * (days - 252) + [start + (last - start) * i / 252 for i in range(1, 253)]
+        history = make_history(closes)
+        history.symbol = symbol
+        return history
+
+    def test_ranking_uses_the_twelve_month_return(self):
+        from trader import momentum
+        histories = {h.symbol: h for h in (self.stock("SLOW", 5), self.stock("FAST", 80),
+                                           self.stock("DOWN", -20), self.stock("MID", 30))}
+        young = make_history([50.0] * 100)
+        young.symbol = "NEW"
+        histories["NEW"] = young   # under a year of prices: cannot be ranked
+        ranked = momentum.rank(histories)
+        self.assertEqual([r.symbol for r in ranked], ["FAST", "MID", "SLOW", "DOWN"])
+        self.assertAlmostEqual(ranked[0].year_pct, 80)
+        self.assertAlmostEqual(ranked[0].price, 100)
+        self.assertIsNone(momentum.measure(young))
+
+    def test_plan_says_what_to_buy_keep_and_sell(self):
+        from trader import momentum
+        ranked = momentum.rank({h.symbol: h for h in (
+            self.stock("AAA", 90), self.stock("BBB", 70), self.stock("CCC", 50), self.stock("DDD", 10))})
+        fresh = momentum.plan(ranked, 2, {})
+        self.assertEqual([(r["symbol"], r["rank"], r["action"]) for r in fresh["picks"]],
+                         [("AAA", 1, "buy"), ("BBB", 2, "buy")])
+        self.assertEqual(fresh["sells"], [])
+        held = {"BBB": 80.0, "DDD": 125.0, "GONE": 10.0}
+        later = momentum.plan(ranked, 2, held)
+        self.assertEqual([(r["symbol"], r["action"]) for r in later["picks"]], [("AAA", "buy"), ("BBB", "keep")])
+        self.assertAlmostEqual(later["picks"][1]["since_bought_pct"], 25.0)
+        sells = {row["symbol"]: row for row in later["sells"]}
+        self.assertEqual(set(sells), {"DDD", "GONE"})
+        self.assertAlmostEqual(sells["DDD"]["since_bought_pct"], -20.0)
+        self.assertEqual(sells["DDD"]["rank"], 4)
+        self.assertIsNone(sells["GONE"]["rank"])      # no longer in the index
+        self.assertIsNone(sells["GONE"]["price"])
+
+    def test_record_against_the_market(self):
+        from trader import momentum
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state" / "momentum.json"
+            portfolio = momentum.Portfolio(path)
+            self.assertIsNone(portfolio.current())
+            self.assertEqual(portfolio.track({}, 100, "2026-01-02")["periods"], [])
+
+            portfolio.save("2026-01-02", "sp500", {"AAA": 100.0, "BBB": 50.0}, 400.0, {})
+            # A month later: AAA +20%, BBB -10%, the market +5%. Equal amounts: +5%.
+            now = {"AAA": 120.0, "BBB": 45.0, "CCC": 10.0}
+            running = portfolio.track(now, 420.0, "2026-02-02")
+            self.assertEqual(len(running["periods"]), 1)
+            self.assertTrue(running["periods"][0]["running"])
+            self.assertAlmostEqual(running["portfolio_pct"], 5.0)
+            self.assertAlmostEqual(running["market_pct"], 5.0)
+
+            portfolio.save("2026-02-02", "sp500", {"AAA": 120.0, "CCC": 10.0}, 420.0, now)
+            reloaded = momentum.Portfolio(path)
+            self.assertEqual(reloaded.holdings(), {"AAA": 120.0, "CCC": 10.0})
+            self.assertEqual(reloaded.records[0]["sold"], {"AAA": 120.0, "BBB": 45.0})
+            # Second month: AAA flat, CCC +30% (so +15%), the market -10%.
+            track = reloaded.track({"AAA": 120.0, "CCC": 13.0}, 378.0, "2026-03-02")
+            first, second = track["periods"]
+            self.assertEqual((first["running"], first["end"]), (False, "2026-02-02"))
+            self.assertAlmostEqual(first["portfolio_pct"], 5.0)
+            self.assertAlmostEqual(second["portfolio_pct"], 15.0)
+            self.assertAlmostEqual(second["market_pct"], -10.0)
+            self.assertAlmostEqual(track["portfolio_pct"], (1.05 * 1.15 - 1) * 100)
+            self.assertAlmostEqual(track["market_pct"], (1.05 * 0.9 - 1) * 100)
+
+            # Saving twice on one day replaces that day's list instead of adding a period.
+            reloaded.save("2026-02-02", "sp500", {"AAA": 120.0}, 420.0, now)
+            self.assertEqual(len(reloaded.records), 2)
+            self.assertEqual(reloaded.holdings(), {"AAA": 120.0})
+
+    def test_a_holding_without_a_price_is_left_out_of_the_result(self):
+        from trader import momentum
+        with tempfile.TemporaryDirectory() as tmp:
+            portfolio = momentum.Portfolio(Path(tmp) / "momentum.json")
+            portfolio.save("2026-01-02", "sp500", {"AAA": 100.0, "LOST": 20.0}, 400.0, {})
+            period = portfolio.track({"AAA": 110.0}, 400.0, "2026-02-02")["periods"][0]
+            self.assertAlmostEqual(period["portfolio_pct"], 10.0)
+            self.assertEqual(period["missing"], 1)
+
+
 class UniverseTests(unittest.TestCase):
     def test_saved_lists(self):
         from trader import universe
@@ -1214,6 +1301,53 @@ class AppTests(unittest.TestCase):
         self.assertEqual([s["title"] for s in entry["signals"]], ["55-day breakout"])
         self.assertEqual(entry["plan"]["levels"][1]["label"], "SL")
         self.assertEqual(self.sent, [])  # a scan never emails
+
+    def test_momentum_list_and_saved_portfolio(self):
+        from unittest import mock
+        from trader import app as app_module
+        maker = MomentumTests()
+        gains = {"AAA": 90, "BBB": 70, "CCC": 50, "DDD": 10, "EEE": -5}
+
+        def many(symbols, source="yahoo", batch=25):
+            for symbol in symbols:
+                yield symbol, (maker.stock(symbol, gains[symbol]) if symbol in gains else DataError("no data"))
+
+        def one(symbol, source="yahoo", notify=print, years=1):
+            return maker.stock(symbol, 8, last=500.0)   # the market fund
+
+        def build(top):
+            with mock.patch.object(app_module, "fetch_many", many), \
+                 mock.patch.object(app_module, "fetch_history", one), \
+                 mock.patch.object(app_module.universe, "load", lambda name: list(gains) + ["NOPE"]):
+                self.assertEqual(self.call("/api/momentum", {"universe": "sp500", "top": top})[1]["error"], "")
+                for _ in range(2000):
+                    status = self.call("/api/state")[1]["momentum"]
+                    if not status["running"]:
+                        break
+            self.assertEqual(status["error"], "")
+            return self.call("/api/momentum")[1]["result"]
+
+        self.assertIn("index", self.call("/api/momentum", {"universe": "day_gainers"})[1]["error"])
+        self.assertIn("Build the list first", self.call("/api/momentum/save", {})[1]["error"])
+        result = build(3)
+        self.assertEqual([(r["symbol"], r["action"]) for r in result["picks"]],
+                         [("AAA", "buy"), ("BBB", "buy"), ("CCC", "buy")])
+        self.assertEqual((result["name"], result["ranked"], result["saved"]), ("S&P 500", 5, None))
+        self.assertAlmostEqual(result["market"]["year_pct"], 8.0)
+
+        self.assertEqual(self.call("/api/momentum/save", {})[1]["error"], "")
+        saved = self.call("/api/momentum")[1]["result"]
+        self.assertEqual(sorted(saved["saved"]["holdings"]), ["AAA", "BBB", "CCC"])
+        self.assertEqual([r["action"] for r in saved["picks"]], ["keep"] * 3)
+        self.assertEqual(len(saved["track"]["periods"]), 1)
+
+        # Next month CCC has faded and DDD has surged: sell one, buy one.
+        gains.update(CCC=-30, DDD=60)
+        later = build(3)
+        self.assertEqual([(r["symbol"], r["action"]) for r in later["picks"]],
+                         [("AAA", "keep"), ("BBB", "keep"), ("DDD", "buy")])
+        self.assertEqual([row["symbol"] for row in later["sells"]], ["CCC"])
+        self.assertEqual(self.sent, [])
 
     def test_page_is_told_when_the_program_was_updated(self):
         from unittest import mock

@@ -186,6 +186,34 @@ A scan only shows results; it never emails. Index members are read from a
 public list on GitHub when you scan, with a copy saved in the project for
 when that list cannot be reached.
 
+### Momentum tab
+
+The Momentum tab runs a different kind of strategy: a portfolio you adjust
+once a month instead of single entries.
+
+1. Pick an index and how many stocks to hold, and press **Build this month's
+   list**. Trader ranks the index by each stock's price change over the last
+   12 months and lists the strongest, with the amount and number of shares for
+   your budget in equal parts.
+2. Buy the listed stocks, then press the save button so Trader remembers your
+   portfolio.
+3. About a month later, build the list again. Each stock is now marked Buy or
+   Keep, and the holdings that dropped off the list are shown under Sell.
+   Trade, then save again.
+
+Below the list, **Your record against the market** shows every period you
+held, next to what the S&P 500 fund did over the same days, and the totals
+since you started. Trader places no orders and the record only knows what you
+save, so save right after you trade.
+
+What to expect: on the S&P 500 from 2018 to 2026, counting only the stocks in
+the index at each date, the ten strongest returned about 20% a year against
+14% for the index fund. The losses along the way were deeper (32% against
+24%) and for the first half of the period it lagged the index. The strongest
+stocks of the past year are often the most volatile ones. Treat it as a
+higher-risk way to hold stocks, not as a proven edge. Returns shown are price
+changes: dividends, commissions and taxes are left out.
+
 ### Backtest tab
 
 The Backtest tab shows how the strategies would have done on one stock's past
