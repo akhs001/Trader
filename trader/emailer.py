@@ -21,9 +21,10 @@ SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 
 DISCLAIMER = (
-    "Automated technical alert. Entry, SL and TP are calculated by fixed rules "
-    "from the price at scan time; they are not predictions and not financial "
-    "advice. Check the chart before trading."
+    "Automated technical alert. Entry, SL, TP and the exit rule are calculated by "
+    "fixed rules from the price at scan time; they are not predictions and not "
+    "financial advice. Most trades from any rule lose or win only a little: keep "
+    "the risk per trade small and check the chart before trading."
 )
 
 
@@ -169,8 +170,17 @@ def plan_rows(signal: Signal) -> list[tuple[str, str, str]]:
 
 def plan_note(signal: Signal, several_signals: bool) -> str:
     plan = signal.plan
-    ratios = " and ".join(f"{abs(t - plan.entry) / plan.risk:g}x" for t in plan.targets)
-    note = f"SL is {plan.stop_basis}. TP is {ratios} the risk of {plan.risk:.2f} per share."
+    note = f"SL is {plan.stop_basis}."
+    if plan.exit_kind == "recover":
+        unit = "hour" if len(signal.date) > 10 else "day"
+        note += (f" TP is where the {plan.exit_period}-{unit} average stands now; "
+                 f"it moves a little every {unit}.")
+    else:
+        ratios = " and ".join(f"{abs(t - plan.entry) / plan.risk:g}x" for t in plan.targets)
+        note += f" TP is {ratios} the risk of {plan.risk:.2f} per share"
+        note += ", for reference: the exit rule decides." if plan.exit_text else "."
+    if plan.exit_text:
+        note += f" {plan.exit_text}"
     if several_signals:
         note += f" Plan based on the {signal.title.lower()} signal."
     return note

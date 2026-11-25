@@ -19,19 +19,6 @@ def sma(values: list[float], period: int) -> list[float | None]:
     return out
 
 
-def ema(values: list[float], period: int) -> list[float | None]:
-    out: list[float | None] = [None] * len(values)
-    if len(values) < period:
-        return out
-    k = 2 / (period + 1)
-    prev = sum(values[:period]) / period
-    out[period - 1] = prev
-    for i in range(period, len(values)):
-        prev = values[i] * k + prev * (1 - k)
-        out[i] = prev
-    return out
-
-
 def rsi(closes: list[float], period: int = 14) -> list[float | None]:
     """Wilder's RSI."""
     out: list[float | None] = [None] * len(closes)
@@ -56,20 +43,6 @@ def _rsi_value(avg_gain: float, avg_loss: float) -> float:
     if avg_loss == 0:
         return 100.0 if avg_gain > 0 else 50.0
     return 100 - 100 / (1 + avg_gain / avg_loss)
-
-
-def macd(
-    closes: list[float], fast: int = 12, slow: int = 26, signal: int = 9
-) -> tuple[list[float | None], list[float | None]]:
-    """Return (macd_line, signal_line)."""
-    fast_ema, slow_ema = ema(closes, fast), ema(closes, slow)
-    line: list[float | None] = [
-        f - s if f is not None and s is not None else None
-        for f, s in zip(fast_ema, slow_ema)
-    ]
-    start = next((i for i, v in enumerate(line) if v is not None), len(line))
-    signal_tail = ema([v for v in line[start:] if v is not None], signal)
-    return line, [None] * start + signal_tail
 
 
 def atr(

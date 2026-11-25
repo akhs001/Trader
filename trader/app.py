@@ -28,14 +28,15 @@ from . import backtest, emailer, market, universe
 from .data import (DataError, SetupError, check_setup, fetch_history, fetch_hourly, fetch_many,
                    source_of)
 from .main import GMAIL_LOGIN_HELP, ROOT, load_env_file
-from .scanner import (StockResult, check_watchlist, email_signals, load_config,
+from .scanner import (StockResult, check_watchlist, email_signals, fetch_benchmark, load_config,
                       load_watchlist, new_signals, scan_history)
-from .signals import STRATEGIES
+from .signals import STRATEGIES, UNPROVEN, market_trend
 from .state import AlertState
 
 UI_FILE = Path(__file__).with_name("ui.html")
 LOGIN_FILE = Path(__file__).with_name("login.html")
 SESSION_DAYS = 30
+SETTINGS_VERSION = 2  # bumped when saved choices from an older version must not carry over
 MIN_PASSWORD = 8
 MIN_INTERVAL, MAX_INTERVAL = 1, 15  # minutes between automatic checks
 SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9.\-:/]{0,14}$")
@@ -70,16 +71,19 @@ class App:
         self.settings_path = state_dir / "app.json"
         self.lock = threading.Lock()
         self.scan = {"running": False, "results": [], "total": 0, "current": "",
-                     "message": "", "finished": 0, "error": "", "email": "",
+                     "message": "", "finished": 0, "error": "", "email": "", "market": None,
                      "strategy": "all", "direction": "both", "timeframe": "1d"}
         settings = self._load_settings()
         self.auto = bool(settings.get("auto"))
         self.interval = settings.get("interval")  # minutes; None = the default from the settings file
         self.last_auto = 0.0
         # Which signals checks look for: one strategy or all, long, short or both.
-        self.strategy, self.direction, self.hourly = "all", "both", False
-        self.set_selection(settings.get("strategy"), settings.get("direction"),
-                           settings.get("timeframe"), save=False)
+        # Which signals checks look for. Shorts lost money in testing, so the
+        # starting choice is long entries only.
+        self.strategy, self.direction, self.hourly = "all", "long", False
+        if settings.get("version") == SETTINGS_VERSION:
+            self.set_selection(settings.get("strategy"), settings.get("direction"),
+                               settings.get("timeframe"), save=False)
         self.backtest = {"running": False, "done": 0, "total": 0, "current": "", "message": "",
                          "error": "", "run": 0}
         self.backtest_result: dict | None = None
@@ -97,7 +101,8 @@ class App:
             "scan": scan,
             "auto": {"enabled": self.auto, "interval": self._interval(),
                      "min": MIN_INTERVAL, "max": MAX_INTERVAL},
-            "strategies": [{"id": key, "name": name} for key, name in STRATEGIES.items()],
+            "strategies": [{"id": key, "name": name, "unproven": key in UNPROVEN}
+                           for key, name in STRATEGIES.items()],
             "selection": {"strategy": self.strategy, "direction": self.direction,
                           "timeframe": "1h" if self.hourly else "1d"},
             "backtest": dict(self.backtest),
@@ -177,7 +182,7 @@ class App:
             if self.scan["running"]:
                 return False
             self.scan.update(running=True, results=[], total=len(symbols), current="",
-                             message="", error="", email="",
+                             message="", error="", email="", market=None,
                              strategy=self.strategy, direction=self.direction,
                              timeframe="1h" if self.hourly else "1d")
         threading.Thread(target=self._check, args=(symbols, send_email), daemon=True).start()
@@ -188,13 +193,15 @@ class App:
         try:
             config = self._config()
             state = AlertState(self.state_path)
+            benchmark = fetch_benchmark(config, notify=lambda text: self._update(message=text))
+            self._update(market=_market_note(config, benchmark))
             results = check_watchlist(
                 symbols, config,
                 on_start=lambda symbol, _: self._update(current=symbol, message=""),
                 on_result=lambda result: self._add_result(result, state, config),
                 notify=lambda text: self._update(message=text),
                 strategy=self.scan["strategy"], direction=self.scan["direction"],
-                hourly=self.scan["timeframe"] == "1h",
+                hourly=self.scan["timeframe"] == "1h", benchmark=benchmark,
             )
             fresh = new_signals(results, state, config)
             if send_email and fresh:
@@ -252,7 +259,7 @@ class App:
         self.settings_path.write_text(json.dumps({
             "auto": self.auto, "interval": self.interval,
             "strategy": self.strategy, "direction": self.direction,
-            "timeframe": "1h" if self.hourly else "1d",
+            "timeframe": "1h" if self.hourly else "1d", "version": SETTINGS_VERSION,
         }))
 
     # --- scanning a whole market ---------------------------------------------
@@ -263,7 +270,7 @@ class App:
         if market_id not in universe.UNIVERSES:
             return "Choose which stocks to scan."
         strategy = body.get("strategy") if body.get("strategy") in STRATEGIES else "all"
-        direction = body.get("direction") if body.get("direction") in ("long", "short") else "both"
+        direction = body.get("direction") if body.get("direction") in ("both", "short") else "long"
         with self.lock:
             if self.screen["running"]:
                 return "A scan is already running."
@@ -278,19 +285,21 @@ class App:
         try:
             config = self._config()
             symbols = universe.load(market_id)
+            benchmark = fetch_benchmark(config, notify=lambda text: self._screen_progress(message=text))
             self._screen_progress(total=len(symbols), message="")
             hits, failed = [], 0
             for done, (symbol, history) in enumerate(fetch_many(symbols, source_of(config)), start=1):
                 if isinstance(history, DataError):
                     failed += 1
                 else:
-                    result = scan_history(history, config, strategy, direction)
+                    result = scan_history(history, config, strategy, direction, benchmark)
                     if result.signals:
                         hits.append(_row(result, set()))
                 self._screen_progress(done=done)
             self.screen_result = {
                 "universe": market_id, "name": universe.UNIVERSES[market_id][0],
                 "strategy": strategy, "direction": direction, "hits": hits,
+                "market": _market_note(config, benchmark),
                 "scanned": len(symbols) - failed, "failed": failed,
                 "finished": time.time(),
             }
@@ -316,11 +325,11 @@ class App:
         hourly_signals = body.get("timeframe") == "1h"
         options = backtest.Options(
             strategy=body.get("strategy") if body.get("strategy") in STRATEGIES else "all",
-            direction=body.get("direction") if body.get("direction") in ("long", "short") else "both",
+            direction=body.get("direction") if body.get("direction") in ("both", "short") else "long",
             # Hourly prices only reach back about two years.
             years=_number(body.get("years"), 2, 1, 2 if in_hours or hourly_signals else 5),
-            target=_number(body.get("target"), 1, 1, 2),
-            hold=_number(body.get("hold"), 30, 1, 250),
+            exit=body.get("exit") if body.get("exit") in ("tp1", "tp2") else "rule",
+            hold=_number(body.get("hold"), 0, 0, 250),
             hold_unit="hours" if in_hours else "days",
             budget=_decimal(body.get("budget"), 10_000.0, 1.0, 1e12),
             risk_pct=_decimal(body.get("risk_pct"), 1.0, 0.01, 100.0),
@@ -350,7 +359,8 @@ class App:
                     self._progress(message=f"Downloading hourly prices for {symbol}")
                     hourly = fetch_hourly(symbol, source=source, notify=notify)
             self._progress(message=f"Testing {symbol}")
-            trades = backtest.backtest_stock(history, config, options, hourly)
+            benchmark = fetch_benchmark(config, notify=notify, years=options.years)
+            trades = backtest.backtest_stock(history, config, options, hourly, benchmark)
             result = backtest.report(trades, options)
             per_day = backtest.HOURS_PER_DAY if hourly_signals else 1
             wanted_from = history.dates[max(0, len(history.dates) - int(options.years * 252 * per_day))][:10]
@@ -428,6 +438,15 @@ class App:
         return f"Test email sent to {recipient}."
 
 
+def _market_note(config: dict, benchmark) -> dict | None:
+    """What the market filter allows right now, for showing on the page."""
+    trend = market_trend(benchmark)
+    if not trend:
+        return None
+    return {"symbol": str(config.get("market", {}).get("symbol", "SPY")),
+            "up": list(trend.values())[-1]}
+
+
 def _number(value, default: int, low: int, high: int) -> int:
     try:
         return min(max(int(value), low), high)
@@ -467,6 +486,7 @@ def _row(result: StockResult, new_ids: set[int]) -> dict:
                 "levels": [{"label": label, "price": price, "pct": pct}
                            for label, price, pct in emailer.plan_rows(first)],
                 "note": emailer.plan_note(first, len(group) > 1),
+                "exit": first.plan.exit_text,
             }
         row["entries"].append(entry)
     return row

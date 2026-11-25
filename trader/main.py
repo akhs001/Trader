@@ -21,8 +21,9 @@ from pathlib import Path
 
 from . import emailer, market
 from .data import SetupError, check_setup, source_of
-from .scanner import (StockResult, check_watchlist, email_signals, load_config,
+from .scanner import (StockResult, check_watchlist, email_signals, fetch_benchmark, load_config,
                       load_watchlist, new_signals)
+from .signals import market_trend
 from .state import AlertState
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -63,8 +64,17 @@ def scan_once(args: argparse.Namespace) -> int:
             note = f"skipped, {result.note}"
         print(f"  {result.symbol:<6} {result.price:>10.2f}  {result.date}  {note}")
 
-    results = check_watchlist(symbols, config, on_result=show,
-                              notify=lambda text: print(f"  ({text})"))
+    notify = lambda text: print(f"  ({text})")
+    benchmark = fetch_benchmark(config, notify)
+    up = market_trend(benchmark)
+    if up:
+        state_now = "above" if list(up.values())[-1] else "below"
+        print(f"  The market is {state_now} its 200-day average: "
+              f"{'long' if state_now == 'above' else 'short'} entries only.")
+    # Shorts lost money in testing, so the console looks for longs unless asked.
+    direction = "both" if args.shorts else "long"
+    results = check_watchlist(symbols, config, on_result=show, notify=notify,
+                              direction=direction, benchmark=benchmark)
     state = AlertState(args.state)
     fresh = new_signals(results, state, config)
     firing = sum(len(r.signals) for r in results)
@@ -124,6 +134,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state", type=Path, default=ROOT / ".state" / "alerts.json")
     parser.add_argument("--loop", action="store_true",
                         help="keep running and scan during US market hours")
+    parser.add_argument("--shorts", action="store_true",
+                        help="also look for short entries")
     parser.add_argument("--dry-run", action="store_true",
                         help="print signals without emailing or remembering them")
     parser.add_argument("--test-email", action="store_true",

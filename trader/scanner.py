@@ -31,8 +31,21 @@ class StockResult:
     error: str = ""  # why its prices could not be read, if they could not
 
 
+def fetch_benchmark(config: dict, notify=print, years: float = 1):
+    """The market's daily history for the market filter, or None if it is off or unavailable."""
+    market = config.get("market", {})
+    if not market.get("filter", True):
+        return None
+    try:
+        return fetch_history(str(market.get("symbol", "SPY")), source=source_of(config),
+                             notify=notify, years=years)
+    except DataError as error:
+        notify(f"The market filter is off for this check: {error}")
+        return None
+
+
 def check_stock(symbol: str, config: dict, notify=print, strategy: str = "all",
-                direction: str = "both", hourly: bool = False) -> StockResult:
+                direction: str = "both", hourly: bool = False, benchmark=None) -> StockResult:
     """Download one stock and look for entry signals. Raises SetupError.
 
     `strategy` (a key of signals.STRATEGIES) and `direction` ("long" or
@@ -46,18 +59,24 @@ def check_stock(symbol: str, config: dict, notify=print, strategy: str = "all",
             history = fetch_history(symbol, source=source_of(config), notify=notify)
     except DataError as error:
         return StockResult(symbol, error=str(error).removeprefix(f"{symbol}: "))
-    return scan_history(history, config, strategy, direction)
+    return scan_history(history, config, strategy, direction, benchmark)
 
 
 def scan_history(history, config: dict, strategy: str = "all",
-                 direction: str = "both") -> StockResult:
-    """Look for entry signals in prices that are already downloaded."""
+                 direction: str = "both", benchmark=None) -> StockResult:
+    """Look for entry signals in prices that are already downloaded.
+
+    "all" runs the strategies switched on in the settings; a strategy's name
+    runs that one, switched on or not.
+    """
+    only = None if strategy == "all" else strategy
+    found = signals.scan(history, config, benchmark, only=only)
     result = StockResult(
         history.symbol,
         price=history.closes[-1],
         date=history.dates[-1],
         facts=signals.facts(history),
-        signals=[s for s in signals.scan(history, config) if wanted(s, strategy, direction)],
+        signals=[s for s in found if wanted(s, strategy, direction)],
     )
     if len(history.closes) >= 2:
         result.change_pct = signals.day_change(history)
@@ -69,14 +88,14 @@ def scan_history(history, config: dict, strategy: str = "all",
 
 def check_watchlist(symbols: list[str], config: dict, on_start=None, on_result=None,
                     notify=print, strategy: str = "all", direction: str = "both",
-                    hourly: bool = False) -> list[StockResult]:
+                    hourly: bool = False, benchmark=None) -> list[StockResult]:
     results = []
     for index, symbol in enumerate(symbols):
         if on_start:
             on_start(symbol, index)
         if index:
             time.sleep(0.3)  # stay polite to the data provider
-        results.append(check_stock(symbol, config, notify, strategy, direction, hourly))
+        results.append(check_stock(symbol, config, notify, strategy, direction, hourly, benchmark))
         if on_result:
             on_result(results[-1])
     return results

@@ -1,35 +1,27 @@
 import tempfile
 import unittest
 import unittest.mock
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-
-from datetime import datetime, timezone
 
 from trader import emailer, indicators, market
 from trader.data import ApiKeyError, DataError, History, parse_time_series
 from trader.main import load_env_file, load_watchlist
-from trader.signals import scan
+from trader.signals import STRATEGIES, UNPROVEN, Analysis, scan
 from trader.state import AlertState
 
-CONFIG = {
-    "signals": {
-        "trend_pullback": {"enabled": True, "lookback_days": 5, "touch_pct": 1.0, "rsi_below": 40},
-        "breakout": {"enabled": True, "lookback_days": 20, "volume_ratio": 1.5},
-        "oversold_bounce": {"enabled": True, "rsi_level": 30},
-        "ma_cross": {"enabled": True, "fast": 20, "slow": 50, "macd": True},
-    }
-}
+# Every strategy switched on, including the ones that are off by default.
+CONFIG = {"signals": {name: {"enabled": True} for name in STRATEGIES}}
 
 
-def make_history(closes, volumes=None, highs=None, lows=None, session_fraction=1.0):
+def make_history(closes, volumes=None, highs=None, lows=None, session_fraction=1.0, opens=None):
     n = len(closes)
     start = date(2024, 1, 1)
     return History(
         symbol="TEST",
         name="Test Corp",
         dates=[(start + timedelta(days=i)).isoformat() for i in range(n)],
-        opens=list(closes),
+        opens=list(opens or closes),
         highs=highs or [c * 1.005 for c in closes],
         lows=lows or [c * 0.995 for c in closes],
         closes=list(closes),
@@ -38,214 +30,12 @@ def make_history(closes, volumes=None, highs=None, lows=None, session_fraction=1
     )
 
 
-def kinds(history, config=CONFIG):
-    return {s.kind for s in scan(history, config)}
+def kinds(history, config=CONFIG, benchmark=None):
+    return {s.kind for s in scan(history, config, benchmark)}
 
 
-class IndicatorTests(unittest.TestCase):
-    def test_sma(self):
-        self.assertEqual(indicators.sma([1, 2, 3, 4, 5], 3), [None, None, 2, 3, 4])
-
-    def test_ema_seeds_with_sma(self):
-        out = indicators.ema([1, 2, 3, 4, 5], 3)
-        self.assertEqual(out[:3], [None, None, 2])
-        self.assertAlmostEqual(out[3], 3)
-        self.assertAlmostEqual(out[4], 4)
-
-    def test_rsi_extremes(self):
-        self.assertEqual(indicators.rsi(list(range(1, 40)))[-1], 100)
-        self.assertEqual(indicators.rsi(list(range(40, 1, -1)))[-1], 0)
-
-    def test_rsi_known_value(self):
-        # Reference series from Wilder's worked example; RSI(14) starts at ~70.5.
-        closes = [44.34, 44.09, 44.15, 43.61, 44.33, 44.83, 45.10, 45.42, 45.84,
-                  46.08, 45.89, 46.03, 45.61, 46.28, 46.28, 46.00, 46.03, 46.41]
-        out = indicators.rsi(closes)
-        self.assertAlmostEqual(out[14], 70.46, places=1)
-        self.assertAlmostEqual(out[15], 66.25, places=1)
-
-    def test_macd_lengths_and_sign(self):
-        closes = [100 + i for i in range(60)]
-        line, signal = indicators.macd(closes)
-        self.assertEqual(len(line), 60)
-        self.assertEqual(len(signal), 60)
-        self.assertGreater(line[-1], 0)
-        self.assertIsNone(signal[32])
-        self.assertIsNotNone(signal[33])
-
-    def test_atr_constant_range(self):
-        n = 30
-        out = indicators.atr([11.0] * n, [9.0] * n, [10.0] * n)
-        self.assertAlmostEqual(out[-1], 2.0)
-
-
-class SignalTests(unittest.TestCase):
-    def test_quiet_uptrend_has_no_signals(self):
-        # Steady compounding growth, with highs far enough above the closes
-        # that no day closes above the previous day's high.
-        closes = [100 * 1.002 ** i for i in range(260)]
-        highs = [c * 1.01 for c in closes]
-        self.assertEqual(kinds(make_history(closes, highs=highs)), set())
-
-    def test_too_little_history(self):
-        self.assertEqual(scan(make_history([100.0] * 30), CONFIG), [])
-
-    def test_breakout_needs_volume(self):
-        closes = [100.0] * 259 + [103.0]
-        quiet = make_history(closes)
-        self.assertNotIn("breakout", kinds(quiet))
-        loud = make_history(closes, volumes=[1_000_000.0] * 259 + [2_000_000.0])
-        self.assertIn("breakout", kinds(loud))
-
-    def test_breakout_fires_only_on_first_day(self):
-        closes = [100.0] * 258 + [103.0, 106.0]
-        volumes = [1_000_000.0] * 258 + [2_000_000.0, 3_000_000.0]
-        self.assertNotIn("breakout", kinds(make_history(closes, volumes=volumes)))
-
-    def test_breakout_projects_partial_day_volume(self):
-        closes = [100.0] * 259 + [103.0]
-        volumes = [1_000_000.0] * 259 + [500_000.0]
-        # Half the average volume by a quarter of the session = 2x pace.
-        self.assertIn("breakout", kinds(make_history(closes, volumes=volumes, session_fraction=0.25)))
-        self.assertNotIn("breakout", kinds(make_history(closes, volumes=volumes, session_fraction=1.0)))
-        # Too early in the session to judge volume at all.
-        self.assertNotIn("breakout", kinds(make_history(closes, volumes=volumes, session_fraction=0.05)))
-
-    def test_oversold_bounce(self):
-        closes = [100.0] * 200 + [100 - i * 1.5 for i in range(1, 21)]
-        self.assertNotIn("oversold_bounce", kinds(make_history(closes)))
-        closes.append(closes[-1] + 12)
-        history = make_history(closes)
-        self.assertIn("oversold_bounce", kinds(history))
-
-    def test_trend_pullback(self):
-        # Steady climb, a four-day dip to the 20-day average, then a turn up.
-        closes = [100 + i * 0.5 for i in range(250)]
-        peak = closes[-1]
-        closes += [peak - 3, peak - 6, peak - 8, peak - 9]
-        highs = [c + 0.5 for c in closes]
-        lows = [c - 0.5 for c in closes]
-        dipping = make_history(closes, highs=highs, lows=lows)
-        self.assertNotIn("trend_pullback", kinds(dipping))
-
-        closes.append(closes[-1] + 3)
-        highs.append(closes[-1] + 0.5)
-        lows.append(closes[-1] - 0.5)
-        turned = make_history(closes, highs=highs, lows=lows)
-        self.assertIn("trend_pullback", kinds(turned))
-
-        # A dip that is too shallow does not count...
-        shallow = {"signals": {**CONFIG["signals"], "trend_pullback": {"min_depth_atr": 50}}}
-        self.assertNotIn("trend_pullback", kinds(turned, shallow))
-        # ...and neither does the second up day in a row.
-        closes.append(closes[-1] + 3)
-        highs.append(closes[-1] + 0.5)
-        lows.append(closes[-1] - 0.5)
-        self.assertNotIn("trend_pullback", kinds(make_history(closes, highs=highs, lows=lows)))
-
-    def test_no_pullback_signal_in_downtrend(self):
-        closes = [300 - i * 0.5 for i in range(250)]
-        closes.append(closes[-1] + 5)
-        self.assertNotIn("trend_pullback", kinds(make_history(closes)))
-
-    def test_ma_cross(self):
-        # Long decline, then a rally strong enough to pull the 20-day over the 50-day.
-        closes = [200 - i * 0.5 for i in range(200)]
-        crossed_at = None
-        for step in range(1, 80):
-            closes.append(closes[-1] + 1.5)
-            if "ma_cross" in kinds(make_history(closes)):
-                crossed_at = step
-                break
-        self.assertIsNotNone(crossed_at)
-        fast, slow = indicators.sma(closes, 20), indicators.sma(closes, 50)
-        self.assertGreater(fast[-1], slow[-1])
-        self.assertLessEqual(fast[-2], slow[-2])
-        # The day after, the cross is no longer "new".
-        closes.append(closes[-1] + 1.5)
-        self.assertNotIn("ma_cross", kinds(make_history(closes)))
-
-    def test_macd_cross(self):
-        # An accelerating decline keeps MACD below its signal line until the rally.
-        closes = [200 - 0.002 * i * i for i in range(200)]
-        self.assertNotIn("macd_cross", kinds(make_history(closes)))
-        fired = False
-        for _ in range(10):
-            closes.append(closes[-1] + 1.5)
-            fired = fired or "macd_cross" in kinds(make_history(closes))
-        self.assertTrue(fired)
-
-    def test_disabled_signal_is_skipped(self):
-        closes = [100.0] * 259 + [103.0]
-        history = make_history(closes, volumes=[1_000_000.0] * 259 + [2_000_000.0])
-        config = {"signals": {**CONFIG["signals"], "breakout": {"enabled": False}}}
-        self.assertNotIn("breakout", kinds(history, config))
-
-    def test_signal_fields(self):
-        closes = [100.0] * 259 + [103.0]
-        history = make_history(closes, volumes=[1_000_000.0] * 259 + [2_000_000.0])
-        signal = next(s for s in scan(history, CONFIG) if s.kind == "breakout")
-        self.assertEqual(signal.symbol, "TEST")
-        self.assertEqual(signal.price, 103.0)
-        self.assertAlmostEqual(signal.change_pct, 3.0)
-        self.assertEqual(signal.date, history.dates[-1])
-        self.assertIn("2.0x", signal.reason)
-        self.assertIn("RSI(14)", signal.facts)
-
-
-class PlanTests(unittest.TestCase):
-    def breakout(self, plan_settings=None, last_close=103.0):
-        closes = [100.0] * 259 + [last_close]
-        history = make_history(closes, volumes=[1_000_000.0] * 259 + [2_000_000.0])
-        config = {**CONFIG, "plan": plan_settings or {}}
-        signal = next(s for s in scan(history, config) if s.kind == "breakout")
-        atr = indicators.atr(history.highs, history.lows, history.closes)[-1]
-        return signal.plan, atr
-
-    def test_stop_sits_below_the_setup_level(self):
-        plan, atr = self.breakout()
-        self.assertEqual(plan.entry, 103.0)
-        # The breakout level is the prior high of 100.50; the stop is a quarter ATR below it.
-        self.assertAlmostEqual(plan.stop, 100.5 - 0.25 * atr)
-        self.assertIn("breakout level (100.50)", plan.stop_basis)
-        self.assertAlmostEqual(plan.targets[0], plan.entry + 2 * plan.risk)
-        self.assertAlmostEqual(plan.targets[1], plan.entry + 3 * plan.risk)
-        self.assertLess(plan.stop, plan.entry)
-
-    def test_stop_is_not_tighter_than_the_minimum(self):
-        plan, atr = self.breakout(last_close=100.6)
-        self.assertAlmostEqual(plan.risk, 1.0 * atr)
-        self.assertIn("too close", plan.stop_basis)
-
-    def test_stop_is_not_wider_than_the_maximum(self):
-        plan, atr = self.breakout({"max_stop_atr": 1.5})
-        self.assertAlmostEqual(plan.risk, 1.5 * atr)
-        self.assertIn("too far", plan.stop_basis)
-
-    def test_custom_targets(self):
-        plan, _ = self.breakout({"targets_r": [1.5]})
-        self.assertEqual(len(plan.targets), 1)
-        self.assertAlmostEqual(plan.targets[0], plan.entry + 1.5 * plan.risk)
-
-    def test_cross_signals_use_a_volatility_stop(self):
-        closes = [200 - i * 0.5 for i in range(200)]
-        signal = None
-        while signal is None:
-            closes.append(closes[-1] + 1.5)
-            history = make_history(closes)
-            signal = next((s for s in scan(history, CONFIG) if s.kind == "ma_cross"), None)
-        atr = indicators.atr(history.highs, history.lows, history.closes)[-1]
-        self.assertAlmostEqual(signal.plan.risk, 2.0 * atr)
-        self.assertEqual(signal.plan.stop_basis, "2 ATR below entry")
-
-    def test_pullback_and_bounce_stops_use_recent_lows(self):
-        closes = [100 + i * 0.5 for i in range(250)]
-        peak = closes[-1]
-        closes += [peak - 3, peak - 6, peak - 8, peak - 9, peak - 6]
-        history = make_history(closes, highs=[c + 0.5 for c in closes], lows=[c - 0.5 for c in closes])
-        signal = next(s for s in scan(history, CONFIG) if s.kind == "trend_pullback")
-        self.assertIn(f"pullback low ({peak - 9.5:.2f})", signal.plan.stop_basis)
-        self.assertLess(signal.plan.stop, peak - 9.5)
+def find(history, kind, config=CONFIG, benchmark=None):
+    return next((s for s in scan(history, config, benchmark) if s.kind == kind), None)
 
 
 def mirrored(history):
@@ -259,15 +49,317 @@ def mirrored(history):
     )
 
 
-def continuation_setup(retrace=20.0):
-    """A slow climb, a strong 40-point run, a retrace of part of it, then a turn up."""
-    closes = [100 + i * 0.05 for i in range(230)]
-    base = closes[-1]
-    closes += [base + 2 * i for i in range(1, 21)]            # the run: +40 in 20 days
+# --- Charts that set up each kind of entry ------------------------------------
+
+def leader(days=300, rate=0.003):
+    """A steady climber: passes the trend template on its last day."""
+    return [100 * (1 + rate) ** i for i in range(days)]
+
+
+def flat_breakout():
+    """A year at 100, then a jump to 103 on double volume: a 55-day breakout and a gap."""
+    return make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
+
+
+def dip_setup(drops=(0.985, 0.985)):
+    """A leader that sells off sharply for two days."""
+    closes = leader()
+    for factor in drops:
+        closes.append(closes[-1] * factor)
+    return make_history(closes)
+
+
+def gap_setup(open_=103.0, close=103.8, low=102.9, volume=3_000_000.0):
+    """A quiet stock that opens far above yesterday's close on heavy volume and holds."""
+    closes = [100.0] * 259 + [close]
+    history = make_history(closes, volumes=[1_000_000.0] * 259 + [volume],
+                           opens=[100.0] * 259 + [open_])
+    history.highs[-1], history.lows[-1] = max(open_, close) + 0.2, low
+    return history
+
+
+def base_setup(volume=2_000_000.0, final=0.995):
+    """A leader builds a five-week base that tightens, then closes above it on volume."""
+    closes = leader()
     top = closes[-1]
-    closes += [top - retrace * i / 4 for i in range(1, 5)]    # the retrace, over 4 days
-    closes.append(closes[-1] + 4)                             # the turn
+    wide = [0.97, 0.95, 0.96, 0.94, 0.96, 0.97, 0.95, 0.96, 0.97, 0.96, 0.95, 0.96, 0.97, 0.96, 0.97]
+    tight = [0.975, 0.98, 0.975, 0.98, 0.978, 0.98, 0.977, 0.98, 0.979, 0.98]
+    closes += [top * level for level in wide + tight] + [top * final]
+    return make_history(closes, volumes=[1_000_000.0] * (len(closes) - 1) + [volume])
+
+
+def pullback_setup(turn=3.0):
+    """A leader dips for four days to its 20-day average, then closes above the prior high."""
+    closes = [100 + i * 0.5 for i in range(250)]
+    peak = closes[-1]
+    closes += [peak - 3, peak - 6, peak - 8, peak - 9, peak - 9 + turn]
     return make_history(closes, highs=[c + 0.5 for c in closes], lows=[c - 0.5 for c in closes])
+
+
+def market_like(history, rising=True):
+    """A benchmark covering the same days, above (or below) its 200-day average at the end."""
+    n = len(history.dates)
+    closes = [100 + i * 0.1 for i in range(n)] if rising else [300 - i * 0.1 for i in range(n)]
+    benchmark = make_history(closes)
+    benchmark.symbol = "SPY"
+    return benchmark
+
+
+class IndicatorTests(unittest.TestCase):
+    def test_sma(self):
+        self.assertEqual(indicators.sma([1, 2, 3, 4, 5], 3), [None, None, 2, 3, 4])
+
+    def test_rsi_extremes(self):
+        self.assertEqual(indicators.rsi(list(range(1, 40)))[-1], 100)
+        self.assertEqual(indicators.rsi(list(range(40, 1, -1)))[-1], 0)
+
+    def test_rsi_known_value(self):
+        # Reference series from Wilder's worked example; RSI(14) starts at ~70.5.
+        closes = [44.34, 44.09, 44.15, 43.61, 44.33, 44.83, 45.10, 45.42, 45.84,
+                  46.08, 45.89, 46.03, 45.61, 46.28, 46.28, 46.00, 46.03, 46.41]
+        out = indicators.rsi(closes)
+        self.assertAlmostEqual(out[14], 70.46, places=1)
+        self.assertAlmostEqual(out[15], 66.25, places=1)
+
+    def test_two_day_rsi_reacts_fast(self):
+        out = indicators.rsi(leader(40) + [100.0, 98.0], 2)
+        self.assertEqual(out[39], 100)
+        self.assertLess(out[-1], 5)
+
+    def test_atr_constant_range(self):
+        n = 30
+        out = indicators.atr([11.0] * n, [9.0] * n, [10.0] * n)
+        self.assertAlmostEqual(out[-1], 2.0)
+
+
+class StrategyTests(unittest.TestCase):
+    def test_quiet_charts_have_no_signals(self):
+        steady = leader()
+        self.assertEqual(kinds(make_history(steady, highs=[c * 1.01 for c in steady])), set())
+        self.assertEqual(kinds(make_history([100.0] * 300)), set())
+        self.assertEqual(scan(make_history([100.0] * 30), CONFIG), [])   # too little history
+
+    def test_dip_in_a_leader(self):
+        signal = find(dip_setup(), "dip")
+        self.assertEqual((signal.strategy, signal.direction, signal.title), ("dip", "long", "Dip in a leader"))
+        self.assertRegex(signal.reason, r"2-day RSI has dropped to \d \(below 10\)")
+        # One down day is not enough, and a stock that is not a leader does not count.
+        self.assertNotIn("dip", kinds(dip_setup(drops=(0.985,))))
+        choppy = make_history([100 + (i % 9) for i in range(298)] + [100.0, 97.0])
+        self.assertNotIn("dip", kinds(choppy))
+        anywhere = {"signals": {**CONFIG["signals"], "dip": {"enabled": True, "leaders_only": False}}}
+        self.assertNotIn("dip", kinds(choppy, anywhere))   # still needs to be above its 200-day average
+
+    def test_dip_plan_aims_at_the_average(self):
+        history = dip_setup()
+        plan = find(history, "dip").plan
+        atr = indicators.atr(history.highs, history.lows, history.closes)[-1]
+        average = indicators.sma(history.closes, 10)[-1]
+        self.assertAlmostEqual(plan.entry - plan.stop, 3 * atr)
+        self.assertEqual(plan.stop_basis, "3 ATR below entry")
+        self.assertEqual(len(plan.targets), 1)
+        self.assertAlmostEqual(plan.targets[0], average)
+        self.assertGreater(plan.targets[0], plan.entry)
+        self.assertEqual((plan.exit_kind, plan.exit_period), ("recover", 10))
+        self.assertEqual(plan.exit_text, "Take the profit when a day closes back above the 10-day average.")
+
+    def test_gap_on_heavy_volume(self):
+        history = gap_setup()
+        signal = find(history, "gap_up")
+        self.assertEqual((signal.strategy, signal.title), ("gap", "Gap up on heavy volume"))
+        self.assertIn("Opened 3.0% above yesterday's close on 3.0x average volume", signal.reason)
+        self.assertIn("the day's low at 102.90", signal.plan.stop_basis)
+        self.assertEqual((signal.plan.exit_kind, signal.plan.exit_period), ("lowest", 20))
+        self.assertEqual(signal.plan.exit_text, "Exit when a day closes below the low of the 20 days before it.")
+        # Not on thin volume, not when the gap was filled, not when it sold off after the open.
+        self.assertNotIn("gap_up", kinds(gap_setup(volume=1_500_000.0)))
+        self.assertNotIn("gap_up", kinds(gap_setup(low=99.9)))
+        self.assertNotIn("gap_up", kinds(gap_setup(open_=104.0, close=102.95)))
+        self.assertNotIn("gap_up", kinds(gap_setup(open_=101.0, close=101.5, low=100.9)))   # too small
+
+    def test_base_breakout(self):
+        signal = find(base_setup(), "base_breakout")
+        self.assertEqual(signal.title, "Base breakout")
+        self.assertRegex(signal.reason, r"closed above the top of its 25-day base \(\d+\.\d\d\) on 2\.0x average volume")
+        self.assertEqual((signal.plan.exit_kind, signal.plan.exit_period), ("sma", 20))
+        self.assertLessEqual(signal.plan.entry - signal.plan.stop, 0.08 * signal.plan.entry + 1e-9)
+        self.assertNotIn("base_breakout", kinds(base_setup(volume=1_100_000.0)))   # no volume
+        self.assertNotIn("base_breakout", kinds(base_setup(final=1.06)))           # too far past the base
+        self.assertNotIn("base_breakout", kinds(base_setup(final=0.98)))           # not through it
+
+    def test_pullback_with_a_turn(self):
+        signal = find(pullback_setup(), "pullback")
+        self.assertEqual(signal.title, "Pullback in an uptrend")
+        self.assertRegex(signal.reason, r"pulled back to its (20|50)-day average")
+        self.assertIn("the pullback low (215.00)", signal.plan.stop_basis)
+        self.assertEqual((signal.plan.exit_kind, signal.plan.exit_period), ("lowest", 10))
+        self.assertNotIn("pullback", kinds(pullback_setup(turn=0.5)))   # no close above the prior high
+        falling = make_history([300 - i * 0.5 for i in range(250)] + [180.0])
+        self.assertNotIn("pullback", kinds(falling))
+
+    def test_55_day_breakout(self):
+        history = flat_breakout()
+        signal = find(history, "channel_breakout")
+        atr = indicators.atr(history.highs, history.lows, history.closes)[-1]
+        self.assertEqual(signal.title, "55-day breakout")
+        self.assertEqual(signal.reason, "Price closed above its 55-day high of 100.50.")
+        self.assertAlmostEqual(signal.plan.entry - signal.plan.stop, 2 * atr)
+        self.assertEqual(signal.plan.stop_basis, "2 ATR below entry")
+        self.assertAlmostEqual(signal.plan.targets[0], 103 + 4 * atr)
+        self.assertAlmostEqual(signal.plan.targets[1], 103 + 6 * atr)
+        self.assertEqual((signal.plan.exit_kind, signal.plan.exit_period), ("lowest", 20))
+        # Only the first day through counts.
+        second_day = make_history([100.0] * 258 + [103.0, 106.0])
+        self.assertNotIn("channel_breakout", kinds(second_day))
+
+    def test_signal_fields(self):
+        history = flat_breakout()
+        signal = find(history, "channel_breakout")
+        self.assertEqual((signal.symbol, signal.price, signal.date), ("TEST", 103.0, history.dates[-1]))
+        self.assertAlmostEqual(signal.change_pct, 3.0)
+        self.assertIn("RSI(14)", signal.facts)
+        self.assertIn("200-day avg", signal.facts)
+
+    def test_volume_of_an_unfinished_day_is_projected(self):
+        def at(fraction):
+            history = gap_setup(volume=1_000_000.0)   # average volume so far...
+            history.session_fraction = fraction
+            return kinds(history)
+        self.assertIn("gap_up", at(0.25))      # ...by a quarter of the day is four times the pace
+        self.assertNotIn("gap_up", at(1.0))
+        self.assertNotIn("gap_up", at(0.05))   # too early to judge volume at all
+
+    def test_unproven_strategies_are_off_unless_asked_for(self):
+        self.assertEqual(UNPROVEN, {"base_breakout", "pullback", "channel_breakout"})
+        history = flat_breakout()
+        self.assertEqual(kinds(history, {}), {"gap_up"})                          # the default set
+        self.assertEqual({s.kind for s in scan(history, {}, only="channel_breakout")}, {"channel_breakout"})
+        self.assertEqual({s.kind for s in scan(history, {}, only="gap")}, {"gap_up"})
+        off = {"signals": {"gap": {"enabled": False}}}
+        self.assertEqual(kinds(history, off), set())
+        self.assertEqual({s.kind for s in scan(history, off, only="gap")}, {"gap_up"})   # asked for by name
+
+
+class MarketFilterTests(unittest.TestCase):
+    def test_longs_only_in_a_rising_market(self):
+        history = flat_breakout()
+        self.assertIn("gap_up", kinds(history, benchmark=market_like(history, rising=True)))
+        self.assertEqual(kinds(history, benchmark=market_like(history, rising=False)), set())
+        # Without a benchmark the filter cannot judge and lets the signal through.
+        self.assertIn("gap_up", kinds(history))
+
+    def test_shorts_only_in_a_falling_market(self):
+        history = mirrored(flat_breakout())
+        self.assertIn("gap_down", kinds(history, benchmark=market_like(history, rising=False)))
+        self.assertEqual(kinds(history, benchmark=market_like(history, rising=True)), set())
+
+    def test_filter_can_be_switched_off(self):
+        history = flat_breakout()
+        config = {**CONFIG, "market": {"filter": False}}
+        self.assertIn("gap_up", kinds(history, config, market_like(history, rising=False)))
+
+    def test_a_leader_must_not_be_weaker_than_the_market(self):
+        history = dip_setup()
+        slower = make_history([100 * 1.0005 ** i for i in range(len(history.dates))])
+        faster = make_history([100 * 1.004 ** i for i in range(len(history.dates))])
+        self.assertIn("dip", kinds(history, benchmark=slower))
+        self.assertNotIn("dip", kinds(history, benchmark=faster))
+
+    def test_market_trend_by_day(self):
+        from trader.signals import market_trend
+        benchmark = make_history([100.0] * 250 + [90.0, 110.0])
+        trend = market_trend(benchmark)
+        self.assertEqual(len(trend), 53)                      # known once 200 days exist
+        self.assertEqual(list(trend.values())[-2:], [False, True])
+        self.assertEqual(market_trend(None), {})
+
+
+class PlanTests(unittest.TestCase):
+    def test_stop_sits_beyond_the_setup_level_within_limits(self):
+        history = pullback_setup()
+        atr = indicators.atr(history.highs, history.lows, history.closes)[-1]
+        plan = find(history, "pullback").plan
+        self.assertAlmostEqual(plan.stop, 215.0 - 0.25 * atr)   # a quarter ATR below the pullback low
+        tight = {**CONFIG, "plan": {"min_stop_atr": 5.0, "max_stop_atr": 6.0}}
+        plan = find(history, "pullback", tight).plan
+        self.assertAlmostEqual(plan.risk, 5 * atr)
+        self.assertIn("too close", plan.stop_basis)
+        wide = {**CONFIG, "plan": {"min_stop_atr": 0.5, "max_stop_atr": 1.0}}
+        plan = find(history, "pullback", wide).plan
+        self.assertAlmostEqual(plan.risk, 1 * atr)
+        self.assertIn("too far", plan.stop_basis)
+
+    def test_custom_targets(self):
+        plan = find(flat_breakout(), "channel_breakout", {**CONFIG, "plan": {"targets_r": [1.5]}}).plan
+        self.assertEqual(len(plan.targets), 1)
+        self.assertAlmostEqual(plan.targets[0], plan.entry + 1.5 * plan.risk)
+
+    def test_percentage_limit_on_the_stop(self):
+        history = base_setup()
+        atr = indicators.atr(history.highs, history.lows, history.closes)[-1]
+        config = {"signals": {"base_breakout": {"enabled": True, "max_stop_pct": 2.0}}}
+        plan = find(history, "base_breakout", config).plan
+        self.assertAlmostEqual(plan.risk, 0.02 * plan.entry)
+        self.assertIn("2% below entry", plan.stop_basis)
+        # A limit tighter than one ATR of everyday noise is not applied.
+        config = {"signals": {"base_breakout": {"enabled": True, "max_stop_pct": 0.5}}}
+        self.assertGreater(find(history, "base_breakout", config).plan.risk, atr)
+
+
+class ShortTests(unittest.TestCase):
+    """Short signals are the long ones upside down."""
+
+    PAIRS = {"dip": "pop", "gap_up": "gap_down", "base_breakout": "base_breakdown",
+             "pullback": "rally", "channel_breakout": "channel_breakdown"}
+
+    def test_every_long_signal_has_a_mirrored_short(self):
+        seen = set()
+        for history in (dip_setup(), gap_setup(), base_setup(), pullback_setup(), flat_breakout()):
+            longs = {s.kind for s in scan(history, CONFIG) if s.direction == "long"}
+            shorts = {s.kind for s in scan(mirrored(history), CONFIG) if s.direction == "short"}
+            self.assertEqual({self.PAIRS[kind] for kind in longs}, shorts)
+            seen |= longs
+        self.assertEqual(seen, set(self.PAIRS))  # every kind was exercised
+
+    def test_short_plan_is_the_long_plan_upside_down(self):
+        history = flat_breakout()
+        long_plan = find(history, "channel_breakout").plan
+        signal = find(mirrored(history), "channel_breakdown")
+        plan, top = signal.plan, 2 * max(history.highs)
+        self.assertEqual((signal.direction, plan.direction), ("short", "short"))
+        self.assertAlmostEqual(plan.entry, top - long_plan.entry)
+        self.assertAlmostEqual(plan.stop, top - long_plan.stop)
+        self.assertAlmostEqual(plan.targets[1], top - long_plan.targets[1])
+        self.assertGreater(plan.stop, plan.entry)        # stop above
+        self.assertLess(plan.targets[0], plan.entry)     # targets below
+        self.assertEqual(plan.stop_basis, "2 ATR above entry")
+        self.assertEqual(signal.reason, "Price closed below its 55-day low of 106.53.")
+        self.assertEqual(plan.exit_text, "Exit when a day closes above the high of the 20 days before it.")
+
+    def test_short_wording(self):
+        pop = find(mirrored(dip_setup()), "pop")
+        self.assertEqual(pop.title, "Pop in a laggard")
+        self.assertRegex(pop.reason, r"2-day RSI has spiked to 9\d \(above 90\)")
+        self.assertEqual(pop.plan.exit_text, "Take the profit when a day closes back below the 10-day average.")
+        self.assertLess(pop.plan.targets[0], pop.plan.entry)
+        gap = find(mirrored(gap_setup()), "gap_down")
+        self.assertIn("below yesterday's close", gap.reason)
+        self.assertIn("the day's high", gap.plan.stop_basis)
+
+    def test_directions_can_be_switched_off(self):
+        history, flipped = flat_breakout(), mirrored(flat_breakout())
+        no_shorts = {"signals": {**CONFIG["signals"], "short": False}}
+        no_longs = {"signals": {**CONFIG["signals"], "long": False}}
+        self.assertEqual({s.direction for s in scan(flipped, no_shorts)}, set())
+        self.assertEqual({s.direction for s in scan(history, no_longs)}, set())
+        self.assertEqual({s.direction for s in scan(flipped, no_longs)}, {"short"})
+
+    def test_email_marks_the_direction(self):
+        signals = [find(mirrored(flat_breakout()), "channel_breakdown")]
+        message = emailer.build_message(signals, "me@example.com", "me@example.com")
+        self.assertEqual(message["Subject"], "Entry alert: TEST short")
+        self.assertIn("TEST (Test Corp) - SHORT", message.get_body(("plain",)).get_content())
+        self.assertIn(">SHORT</span>", message.get_body(("html",)).get_content())
 
 
 def hourly_history(closes, volumes=None):
@@ -283,18 +375,33 @@ def hourly_history(closes, volumes=None):
     return history
 
 
+def hourly_breakout(after=()):
+    closes = [100.0] * 259 + [103.0] + list(after)
+    return hourly_history(closes, volumes=[1_000_000.0] * 259 + [2_000_000.0] + [1_000_000.0] * len(after))
+
+
 class HourlyTests(unittest.TestCase):
     def test_hourly_candles_use_hourly_wording(self):
-        history = hourly_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
+        history = hourly_breakout()
         self.assertTrue(history.hourly)
         self.assertFalse(make_history([100.0] * 60).hourly)
         signals = {s.kind: s for s in scan(history, CONFIG)}
-        self.assertIn("20-hour high", signals["breakout"].reason)
-        self.assertIn("20-hour average", signals["ma_cross"].reason)
-        self.assertEqual(signals["breakout"].date, history.dates[-1])
-        self.assertIn("200-hour avg", signals["breakout"].facts)
+        self.assertEqual(signals["channel_breakout"].title, "55-hour breakout")
+        self.assertIn("55-hour high", signals["channel_breakout"].reason)
+        self.assertIn("above the previous hour's close", signals["gap_up"].reason)
+        self.assertEqual(signals["gap_up"].plan.exit_text,
+                         "Exit when a hour closes below the low of the 20 hours before it.")
+        self.assertEqual(signals["gap_up"].date, history.dates[-1])
+        self.assertIn("200-hour avg", signals["gap_up"].facts)
         message = emailer.build_message(list(signals.values()), "a@b.c", "a@b.c")
         self.assertEqual(message["Subject"], "Entry alert (hourly): TEST long")
+
+    def test_market_filter_uses_the_day_of_the_hour(self):
+        history = hourly_breakout()
+        days = sorted({stamp[:10] for stamp in history.dates})
+        falling = make_history([300 - i * 0.1 for i in range(260)])
+        falling.dates = [(date.fromisoformat(days[-1]) - timedelta(days=259 - i)).isoformat() for i in range(260)]
+        self.assertEqual(kinds(history, benchmark=falling), set())
 
     def test_change_is_measured_from_the_previous_day(self):
         from trader.signals import day_change
@@ -305,13 +412,12 @@ class HourlyTests(unittest.TestCase):
         self.assertAlmostEqual(day_change(make_history([100.0, 110.0])), 10.0)
 
     def test_hourly_alerts_have_their_own_cooldown(self):
-        history = hourly_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
-        signal = next(s for s in scan(history, CONFIG) if s.kind == "breakout")
+        signal = find(hourly_breakout(), "channel_breakout")
         with tempfile.TemporaryDirectory() as tmp:
             state = AlertState(Path(tmp) / "alerts.json")
             signal.date = "2025-03-03 10:30"
             state.record([signal])
-            self.assertEqual(list(state.sent), ["TEST:breakout:1h"])
+            self.assertEqual(list(state.sent), ["TEST:channel_breakout:1h"])
             signal.date = "2025-03-03 15:30"
             self.assertFalse(state.is_new(signal, 5, cooldown_hours=24))
             signal.date = "2025-03-04 10:30"
@@ -333,210 +439,160 @@ class HourlyTests(unittest.TestCase):
 
     def test_backtest_on_hourly_candles_counts_days_as_seven_hours(self):
         from trader import backtest
-        closes = [100.0] * 259 + [103.0] + [103.2] * 30
-        history = hourly_history(closes, volumes=[1_000_000.0] * 259 + [2_000_000.0] + [1_000_000.0] * 30)
+        history = hourly_breakout(after=[103.2] * 30)
         def run(hold, unit):
-            options = backtest.Options(strategy="breakout", direction="long", years=0.1, hold=hold, hold_unit=unit)
+            options = backtest.Options(strategy="channel_breakout", years=0.1, hold=hold, hold_unit=unit)
             return backtest.backtest_stock(history, CONFIG, options)[0]
         self.assertEqual((run(3, "hours").reason, run(3, "hours").held), ("time", 3))
         self.assertEqual((run(2, "days").reason, run(2, "days").held), ("time", 14))
         self.assertEqual(run(3, "hours").entry_date, history.dates[259])
 
 
-class ContinuationTests(unittest.TestCase):
-    def find(self, history):
-        return next((s for s in scan(history, CONFIG) if s.kind == "trend_continuation"), None)
-
-    def test_fires_after_a_strong_run_and_a_partial_retrace(self):
-        signal = self.find(continuation_setup())
-        self.assertIsNotNone(signal)
-        self.assertEqual((signal.strategy, signal.direction, signal.title),
-                         ("trend_continuation", "long", "Uptrend continuation"))
-        self.assertRegex(signal.reason, r"Strong uptrend \(up \d+% in \d+ days")
-        self.assertRegex(signal.reason, r"retraced (49|50)% of the rise to 130\.95")
-        self.assertIn("the retrace low", signal.plan.stop_basis)
-        self.assertLess(signal.plan.stop, signal.plan.entry)
-
-    def test_needs_a_real_retrace_but_not_a_collapse(self):
-        self.assertIsNone(self.find(continuation_setup(retrace=6)))    # barely dipped
-        self.assertIsNone(self.find(continuation_setup(retrace=34)))   # gave back most of the run
-
-    def test_needs_a_big_move(self):
-        strict = {"signals": {**CONFIG["signals"], "trend_continuation": {"min_leg_atr": 60}}}
-        self.assertEqual([s for s in scan(continuation_setup(), strict) if s.strategy == "trend_continuation"], [])
-
-    def test_short_version(self):
-        signal = next(s for s in scan(mirrored(continuation_setup()), CONFIG) if s.kind == "trend_continuation_down")
-        self.assertEqual((signal.direction, signal.title), ("short", "Downtrend continuation"))
-        self.assertRegex(signal.reason, r"bounced (49|50)% of the drop")
-        self.assertGreater(signal.plan.stop, signal.plan.entry)
-
-
-class ShortTests(unittest.TestCase):
-    """Short signals are the long ones upside down."""
-
-    PAIRS = {"trend_continuation": "trend_continuation_down",
-             "trend_pullback": "trend_rally", "breakout": "breakdown",
-             "oversold_bounce": "overbought_drop", "ma_cross": "ma_cross_down",
-             "macd_cross": "macd_cross_down"}
-
-    def long_setups(self):
-        yield make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
-        yield continuation_setup()
-        closes = [100 + i * 0.5 for i in range(250)]
-        peak = closes[-1]
-        closes += [peak - 3, peak - 6, peak - 8, peak - 9, peak - 6]
-        yield make_history(closes, highs=[c + 0.5 for c in closes], lows=[c - 0.5 for c in closes])
-        closes = [100.0] * 200 + [100 - i * 1.5 for i in range(1, 21)]
-        yield make_history(closes + [closes[-1] + 12])
-        closes = [200 - i * 0.5 for i in range(200)]
-        for _ in range(60):
-            closes.append(closes[-1] + 1.5)
-            yield make_history(closes)
-
-    def test_every_long_signal_has_a_mirrored_short(self):
-        seen = set()
-        for history in self.long_setups():
-            longs = {s.kind for s in scan(history, CONFIG) if s.direction == "long"}
-            shorts = {s.kind for s in scan(mirrored(history), CONFIG) if s.direction == "short"}
-            self.assertEqual({self.PAIRS[kind] for kind in longs}, shorts)
-            seen |= longs
-        self.assertEqual(seen, set(self.PAIRS))  # every kind was exercised
-
-    def test_short_plan_is_the_long_plan_upside_down(self):
-        history = make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
-        long_plan = next(s for s in scan(history, CONFIG) if s.kind == "breakout").plan
-        flipped = mirrored(history)
-        signal = next(s for s in scan(flipped, CONFIG) if s.kind == "breakdown")
-        plan, top = signal.plan, 2 * max(history.highs)
-        self.assertEqual((signal.direction, plan.direction), ("short", "short"))
-        self.assertAlmostEqual(plan.entry, top - long_plan.entry)
-        self.assertAlmostEqual(plan.stop, top - long_plan.stop)
-        self.assertAlmostEqual(plan.targets[1], top - long_plan.targets[1])
-        self.assertGreater(plan.stop, plan.entry)        # stop above
-        self.assertLess(plan.targets[0], plan.entry)     # targets below
-        self.assertAlmostEqual(plan.risk, long_plan.risk)
-        self.assertIn("just above the breakdown level", plan.stop_basis)
-        self.assertIn("moved below its 20-day low", signal.reason)
-
-    def test_short_wording(self):
-        closes = [100.0] * 200 + [100 + i * 1.5 for i in range(1, 21)]
-        history = make_history(closes + [closes[-1] - 12])
-        signal = next(s for s in scan(history, CONFIG) if s.kind == "overbought_drop")
-        self.assertRegex(signal.reason, r"crossed back below 70 \(yesterday (100|[789]\d), now [3-6]\d\)")
-        self.assertIn("the recent high", signal.plan.stop_basis)
-
-    def test_directions_can_be_switched_off(self):
-        history = make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
-        flipped = mirrored(history)
-        no_shorts = {"signals": {**CONFIG["signals"], "short": False}}
-        no_longs = {"signals": {**CONFIG["signals"], "long": False}}
-        self.assertEqual({s.direction for s in scan(flipped, no_shorts)}, set())
-        self.assertEqual({s.direction for s in scan(history, no_longs)}, set())
-        self.assertEqual({s.direction for s in scan(flipped, no_longs)}, {"short"})
-
-    def test_email_marks_the_direction(self):
-        history = mirrored(make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0]))
-        signals = [s for s in scan(history, CONFIG) if s.kind == "breakdown"]
-        message = emailer.build_message(signals, "me@example.com", "me@example.com")
-        self.assertEqual(message["Subject"], "Entry alert: TEST short")
-        self.assertIn("TEST (Test Corp) - SHORT", message.get_body(("plain",)).get_content())
-        self.assertIn(">SHORT</span>", message.get_body(("html",)).get_content())
-
-
 class BacktestTests(unittest.TestCase):
-    def setup_then(self, later, short=False):
-        """A breakout on a flat stock, followed by the given (open, high, low, close) days."""
+    def after_breakout(self, later, short=False, **options):
+        """The 55-day breakout at 103, followed by the given (open, high, low, close) days."""
         from trader import backtest
-        closes = [100.0] * 259 + [103.0]
-        history = make_history(closes, volumes=[1_000_000.0] * 259 + [2_000_000.0])
-        plan = next(s for s in scan(history, CONFIG) if s.kind == "breakout").plan
+        history = flat_breakout()
+        plan = find(history, "channel_breakout").plan
         for i, (open_, high, low, close) in enumerate(later):
             history.dates.append((date(2025, 1, 1) + timedelta(days=i)).isoformat())
             history.opens.append(open_); history.highs.append(high)
             history.lows.append(low); history.closes.append(close)
             history.volumes.append(1_000_000.0)
         if short:
-            history, top = mirrored(history), 2 * max(history.highs)
-        options = backtest.Options(strategy="breakout", direction="short" if short else "long",
-                                   years=0.1, target=1, hold=3)
-        trades = backtest.backtest_stock(history, CONFIG, options)
+            history = mirrored(history)
+        settings = dict(strategy="channel_breakout", direction="short" if short else "long",
+                        years=0.1, exit="tp1", hold=3)
+        settings.update(options)
+        trades = backtest.backtest_stock(history, CONFIG, backtest.Options(**settings))
         return plan, trades[0]
 
     def test_target_hit(self):
-        plan, trade = self.setup_then([(103, 104, 102.5, 103.5), (104, 110, 103.5, 109)])
+        plan, trade = self.after_breakout([(103, 104, 102.5, 103.5), (104, 110, 103.5, 109)])
         self.assertEqual((trade.reason, trade.held), ("target", 2))
         self.assertAlmostEqual(trade.exit, plan.targets[0])
         self.assertAlmostEqual(trade.r, 2.0)
+        _, second = self.after_breakout([(103, 104, 102.5, 103.5), (104, 111, 103.5, 110)], exit="tp2")
+        self.assertAlmostEqual(second.r, 3.0)
 
     def test_stop_hit(self):
-        plan, trade = self.setup_then([(103, 103.5, 99, 100)])
+        plan, trade = self.after_breakout([(103, 103.5, 99, 100)])
         self.assertEqual(trade.reason, "stop")
         self.assertAlmostEqual(trade.exit, plan.stop)
         self.assertAlmostEqual(trade.r, -1.0)
 
     def test_stop_wins_when_both_are_touched_the_same_day(self):
-        _, trade = self.setup_then([(103, 115, 95, 110)])
+        _, trade = self.after_breakout([(103, 115, 95, 110)])
         self.assertEqual(trade.reason, "stop")
         self.assertAlmostEqual(trade.r, -1.0)
 
-    def test_gap_through_the_stop_exits_at_the_open(self):
-        _, trade = self.setup_then([(97, 98, 96, 97)])
-        self.assertEqual((trade.reason, trade.exit), ("stop", 97))
-        self.assertLess(trade.r, -1.0)
+    def test_gaps_exit_at_the_open(self):
+        _, stopped = self.after_breakout([(97, 98, 96, 97)])
+        self.assertEqual((stopped.reason, stopped.exit), ("stop", 97))
+        self.assertLess(stopped.r, -1.0)
+        _, paid = self.after_breakout([(112, 113, 111, 112)])
+        self.assertEqual((paid.reason, paid.exit), ("target", 112))
+        self.assertGreater(paid.r, 2.0)
 
-    def test_gap_through_the_target_exits_at_the_open(self):
-        _, trade = self.setup_then([(112, 113, 111, 112)])
-        self.assertEqual((trade.reason, trade.exit), ("target", 112))
-        self.assertGreater(trade.r, 2.0)
-
-    def test_time_limit(self):
-        _, trade = self.setup_then([(103, 104, 102, 103.5)] * 5)
+    def test_time_limit_and_no_time_limit(self):
+        quiet = [(103, 104, 102, 103.5)] * 5
+        _, trade = self.after_breakout(quiet)
         self.assertEqual((trade.reason, trade.held, trade.exit), ("time", 3, 103.5))
+        _, unlimited = self.after_breakout(quiet, hold=0)
+        self.assertEqual(unlimited.reason, "open")
 
     def test_trade_still_open_at_the_end(self):
         from trader import backtest
-        _, trade = self.setup_then([(103, 104, 102, 103.5)])
+        _, trade = self.after_breakout([(103, 104, 102, 103.5)])
         self.assertEqual(trade.reason, "open")
         self.assertEqual(backtest.summarize([trade]), {"trades": 0, "open": 1, "profit": 0.0})
 
+    def test_exit_rule_lets_a_winner_run_until_its_trend_breaks(self):
+        # Up for 25 days, far past both targets, then a slide below the 20-day low.
+        climb = [(103 + i, 104.5 + i, 102.5 + i, 104 + i) for i in range(25)]
+        slide = [(128 - 2 * i, 128.5 - 2 * i, 125.5 - 2 * i, 126 - 2 * i) for i in range(1, 12)]
+        plan, trade = self.after_breakout(climb + slide, exit="rule", hold=0, years=0.5)
+        self.assertEqual(trade.reason, "rule")
+        self.assertGreater(trade.r, 3.0)                     # more than TP2 would have paid
+        self.assertLess(trade.exit, 128)                     # but below the top: the price of waiting
+        _, capped = self.after_breakout(climb + slide, years=0.5, hold=0)   # the same days with a fixed target
+        self.assertEqual(capped.reason, "target")
+        self.assertAlmostEqual(capped.r, 2.0)
+        # The stop still applies while the rule waits.
+        _, stopped = self.after_breakout([(103, 103.5, 99, 100)], exit="rule", hold=0)
+        self.assertEqual(stopped.reason, "stop")
+
+    def test_dip_is_closed_when_it_recovers_above_its_average(self):
+        from trader import backtest
+        history = dip_setup()
+        last = history.closes[-1]
+        for i, close in enumerate([last * 1.004, last * 1.01, last * 1.03, last * 1.05]):
+            history.dates.append((date(2025, 6, 1) + timedelta(days=i)).isoformat())
+            history.opens.append(close); history.highs.append(close * 1.002)
+            history.lows.append(close * 0.998); history.closes.append(close)
+            history.volumes.append(1_000_000.0)
+        options = backtest.Options(strategy="dip", years=0.1, hold=0)
+        trade = backtest.backtest_stock(history, CONFIG, options)[0]
+        self.assertEqual((trade.title, trade.reason), ("Dip in a leader", "rule"))
+        average = indicators.sma(history.closes, 10)
+        day = history.dates.index(trade.exit_date)
+        self.assertGreater(history.closes[day], average[day])           # closed back above it...
+        self.assertLessEqual(history.closes[day - 1], average[day - 1])  # ...for the first time
+        self.assertGreater(trade.r, 0)
+
     def test_short_trade_is_the_long_trade_upside_down(self):
-        _, long_trade = self.setup_then([(103, 104, 102.5, 103.5), (104, 110, 103.5, 109)])
-        _, short_trade = self.setup_then([(103, 104, 102.5, 103.5), (104, 110, 103.5, 109)], short=True)
+        days = [(103, 104, 102.5, 103.5), (104, 110, 103.5, 109)]
+        _, long_trade = self.after_breakout(days)
+        _, short_trade = self.after_breakout(days, short=True)
         self.assertEqual((short_trade.direction, short_trade.reason), ("short", "target"))
         self.assertAlmostEqual(short_trade.r, long_trade.r)
         self.assertLess(short_trade.exit, short_trade.entry)
 
     def test_only_the_chosen_strategy_and_direction_are_traded(self):
         from trader import backtest
-        closes = [200 - 0.002 * i * i for i in range(200)] + [120 + i * 1.5 for i in range(1, 80)]
-        history = make_history(closes)
-        everything = backtest.backtest_stock(history, CONFIG, backtest.Options(years=1))
-        self.assertGreater(len({t.strategy for t in everything}), 1)
-        only = backtest.backtest_stock(history, CONFIG, backtest.Options(strategy="macd_cross", direction="long", years=1))
-        self.assertTrue(only)
-        self.assertEqual({(t.strategy, t.direction) for t in only}, {("macd_cross", "long")})
+        history = flat_breakout()
+        for i in range(5):
+            history.dates.append((date(2025, 1, 1) + timedelta(days=i)).isoformat())
+            for series, value in ((history.opens, 103.0), (history.highs, 103.5), (history.lows, 102.6),
+                                  (history.closes, 103.0), (history.volumes, 1_000_000.0)):
+                series.append(value)
+        def traded(**options):
+            trades = backtest.backtest_stock(history, {}, backtest.Options(years=0.1, **options))
+            return {(t.strategy, t.direction) for t in trades}
+        self.assertEqual(traded(), {("gap", "long")})                                   # the tested set
+        self.assertEqual(traded(strategy="channel_breakout"), {("channel_breakout", "long")})
+        self.assertEqual(traded(strategy="gap", direction="short"), set())
+
+    def test_market_filter_applies_to_past_days(self):
+        from trader import backtest
+        history = flat_breakout()
+        options = backtest.Options(strategy="gap", years=0.1)
+        self.assertTrue(backtest.backtest_stock(history, {}, options, benchmark=market_like(history, True)))
+        self.assertEqual(backtest.backtest_stock(history, {}, options, benchmark=market_like(history, False)), [])
 
     def test_past_days_scan_exactly_like_live_days(self):
-        from trader.signals import Analysis
         import math
-        closes = [100 + 20 * math.sin(i / 9) + i * 0.05 + (i % 7) * 0.4 for i in range(420)]
-        volumes = [1_000_000.0 * (1 + (i % 11) / 5) for i in range(420)]
-        history = make_history(closes, volumes=volumes)
-        analysis, compared = Analysis(history), 0
-        for end in range(205, 420):
-            part = make_history(closes[:end], volumes=volumes[:end])
-            live = [(s.kind, s.reason, s.plan.stop, s.plan.targets) for s in scan(part, CONFIG)]
-            past = [(s.kind, s.reason, s.plan.stop, s.plan.targets) for s in analysis.scan(CONFIG, end=end)]
+        closes = [100 * 1.001 ** i + 12 * math.sin(i / 9) + (i % 7) * 0.4 for i in range(520)]
+        volumes = [1_000_000.0 * (1 + (i % 11) / 3) for i in range(520)]
+        opens = [c - 1.5 * math.cos(i / 5) for i, c in enumerate(closes)]
+        history = make_history(closes, volumes=volumes, opens=opens)
+        benchmark = make_history([100 + i * 0.05 + 6 * math.sin(i / 40) for i in range(520)])
+        analysis, compared = Analysis(history, benchmark), 0
+        describe = lambda s: (s.kind, s.reason, s.plan.stop, s.plan.targets, s.plan.exit_text)
+        for end in range(260, 520):
+            part = make_history(closes[:end], volumes=volumes[:end], opens=opens[:end])
+            cut = make_history(benchmark.closes[:end])
+            live = [describe(s) for s in scan(part, CONFIG, cut)]
+            past = [describe(s) for s in analysis.scan(CONFIG, end=end)]
             self.assertEqual(live, past)
             compared += len(live)
-        self.assertGreater(compared, 20)
+        self.assertGreater(compared, 5)
 
     def test_budget_follows_the_trades(self):
         from trader import backtest
         def trade(entry_day, exit_day, r, stop=95.0):
             won = r > 0
-            return backtest.Trade("T", "breakout", "Breakout", "long", f"2025-01-{entry_day:02d}", 100, stop, 110,
+            return backtest.Trade("T", "gap", "Gap", "long", f"2025-01-{entry_day:02d}", 100, stop, 110,
                                   f"2025-01-{exit_day:02d}", 100 + (100 - stop) * r, "target" if won else "stop",
                                   r, (100 - stop) * r, exit_day - entry_day)
         # 1% risk of 10,000 = 100 per trade; the SL is 5 away, so 20 shares.
@@ -555,7 +611,7 @@ class BacktestTests(unittest.TestCase):
 
     def test_position_is_never_larger_than_the_budget(self):
         from trader import backtest
-        tight = backtest.Trade("T", "breakout", "Breakout", "long", "2025-01-01", 100, 99.9, 101,
+        tight = backtest.Trade("T", "gap", "Gap", "long", "2025-01-01", 100, 99.9, 101,
                                "2025-01-02", 99.9, "stop", -1, -0.1, 1)
         backtest.apply_budget([tight], 10_000, 1)
         # Risking 100 with the SL only 0.10 away would need 1,000 shares = 100,000.
@@ -564,8 +620,7 @@ class BacktestTests(unittest.TestCase):
 
     def test_hours_are_followed_on_hourly_candles(self):
         from trader import backtest
-        closes = [100.0] * 259 + [103.0]
-        history = make_history(closes, volumes=[1_000_000.0] * 259 + [2_000_000.0])
+        history = flat_breakout()
         history.dates.append("2024-09-17"); history.opens.append(103); history.highs.append(111)
         history.lows.append(102); history.closes.append(110); history.volumes.append(1_000_000.0)
         signal_day = history.dates[-2]
@@ -574,7 +629,8 @@ class BacktestTests(unittest.TestCase):
         hourly = History("TEST", "TEST", stamps, opens=[205, 206, 208, 209], highs=[206, 209, 210, 223],
                          lows=[204, 205, 207, 208], closes=[206, 208, 209, 222], volumes=[1.0] * 4)
         def run(hold):
-            options = backtest.Options(strategy="breakout", direction="long", years=0.1, hold=hold, hold_unit="hours")
+            options = backtest.Options(strategy="channel_breakout", years=0.1, exit="tp1",
+                                       hold=hold, hold_unit="hours")
             return backtest.backtest_stock(history, CONFIG, options, hourly)[0]
         two_hours = run(2)
         self.assertEqual((two_hours.reason, two_hours.held, two_hours.exit_date), ("time", 2, "2024-09-17 10:30"))
@@ -584,13 +640,13 @@ class BacktestTests(unittest.TestCase):
         self.assertAlmostEqual(longer.r, 2.0)
         # Days before the hourly candles begin are not tested.
         late = History("TEST", "TEST", stamps[1:], [206, 208, 209], [209, 210, 223], [205, 207, 208], [208, 209, 222], [1.0] * 3)
-        options = backtest.Options(strategy="breakout", direction="long", years=0.1, hold=2, hold_unit="hours")
+        options = backtest.Options(strategy="channel_breakout", years=0.1, hold=2, hold_unit="hours")
         self.assertEqual(backtest.backtest_stock(history, CONFIG, options, late), [])
 
     def test_summary_numbers(self):
         from trader import backtest
         def trade(r, day):
-            return backtest.Trade("T", "breakout", "Breakout", "long", "2025-01-01", 100, 95, 110,
+            return backtest.Trade("T", "gap", "Gap up on heavy volume", "long", "2025-01-01", 100, 95, 110,
                                   f"2025-02-{day:02d}", 100 + 5 * r, "target" if r > 0 else "stop", r, 5 * r, 4)
         stats = backtest.summarize([trade(2, 1), trade(-1, 2), trade(-1, 3), trade(2, 4)])
         self.assertEqual(stats["trades"], 4)
@@ -601,7 +657,7 @@ class BacktestTests(unittest.TestCase):
         self.assertAlmostEqual(stats["max_drawdown_r"], 2)
         report = backtest.report([trade(2, 1), trade(-1, 2)])
         self.assertEqual([p["r"] for p in report["curve"]], [2, 1])
-        self.assertEqual(report["rows"][0]["name"], "Breakout")
+        self.assertEqual(report["rows"][0]["name"], "Gap on heavy volume")
 
 
 class UniverseTests(unittest.TestCase):
@@ -750,9 +806,7 @@ class DataTests(unittest.TestCase):
 
 class StateAndEmailTests(unittest.TestCase):
     def signal(self, day="2024-06-10"):
-        closes = [100.0] * 259 + [103.0]
-        history = make_history(closes, volumes=[1_000_000.0] * 259 + [2_000_000.0])
-        signal = next(s for s in scan(history, CONFIG) if s.kind == "breakout")
+        signal = find(flat_breakout(), "channel_breakout")
         signal.date = day
         return signal
 
@@ -785,11 +839,19 @@ class StateAndEmailTests(unittest.TestCase):
         html = message.get_body(("html",)).get_content()
         for body in (text, html):
             self.assertIn("TEST", body)
-            self.assertIn("Breakout", body)
+            self.assertIn("55-day breakout", body)
             self.assertIn("103.00", body)
-            self.assertIn("not financial advice", body)
-            for label in ("Entry", "SL", "TP1", "TP2", "108.59", "breakout level"):
+            self.assertIn("financial advice", body)
+            for label in ("Entry", "SL", "TP1", "TP2", "107.72", "2 ATR below entry",
+                          "Exit when a day closes below the low of the 20 days before it."):
                 self.assertIn(label, body)
+
+    def test_email_for_a_dip_names_its_target(self):
+        text = emailer.build_message([find(dip_setup(), "dip")], "a@b.c", "a@b.c").get_body(("plain",)).get_content()
+        self.assertIn("TP:", text)
+        self.assertNotIn("TP1", text)
+        self.assertIn("TP is where the 10-day average stands now", text)
+        self.assertIn("Take the profit when a day closes back above the 10-day average.", text)
 
     def test_watchlist_parsing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -855,13 +917,14 @@ class AppTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         (root / "watchlist.txt").write_text("AAA\nBBB\n")
-        (root / "config.toml").write_text("[data]\nsource = \"twelvedata\"\n[schedule]\ninterval_minutes = 15\n")
+        (root / "config.toml").write_text(
+            "[data]\nsource = \"twelvedata\"\n[schedule]\ninterval_minutes = 15\n[market]\nfilter = false\n")
         self.sent = []
 
         def fake_fetch(symbol, source="yahoo", notify=print, years=1):
             if symbol == "BBB":
                 raise DataError("BBB: symbol not found")
-            history = make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
+            history = flat_breakout()
             history.symbol = history.name = symbol
             history.dates[-1] = date.today().isoformat()
             return history
@@ -920,7 +983,8 @@ class AppTests(unittest.TestCase):
         self.assertEqual(rows["BBB"]["error"], "symbol not found")
         entry = rows["AAA"]["entries"][0]
         self.assertEqual(entry["direction"], "long")
-        self.assertIn("Breakout", [s["title"] for s in entry["signals"]])
+        self.assertEqual([s["title"] for s in entry["signals"]], ["Gap up on heavy volume"])
+        self.assertIn("Exit when a day closes below the low of the 20 days before it.", entry["plan"]["exit"])
         self.assertTrue(all(s["new"] for s in entry["signals"]))
         self.assertEqual([level["label"] for level in entry["plan"]["levels"]],
                          ["Entry", "SL", "TP1", "TP2"])
@@ -991,21 +1055,55 @@ class AppTests(unittest.TestCase):
         self.assertEqual([round(b - a) for a, b in zip(started, started[1:])], [60, 60, 60])
 
     def test_checks_use_the_chosen_strategy(self):
-        self.assertEqual(self.call("/api/state")[1]["selection"], {"strategy": "all", "direction": "both", "timeframe": "1d"})
-        self.call("/api/selection", {"strategy": "breakout", "direction": "long"})
+        # Long entries from the tested strategies, until the user chooses otherwise.
+        state = self.call("/api/state")[1]
+        self.assertEqual(state["selection"], {"strategy": "all", "direction": "long", "timeframe": "1d"})
+        self.assertEqual([(s["id"], s["unproven"]) for s in state["strategies"]],
+                         [("dip", False), ("gap", False), ("base_breakout", True),
+                          ("pullback", True), ("channel_breakout", True)])
+        # Picking an unproven strategy by name runs it.
+        self.call("/api/selection", {"strategy": "channel_breakout", "direction": "long"})
         scan = self.check(email=False)
         titles = [s["title"] for e in scan["results"][0]["entries"] for s in e["signals"]]
-        self.assertEqual(titles, ["Breakout"])
-        self.assertEqual((scan["strategy"], scan["direction"]), ("breakout", "long"))
+        self.assertEqual(titles, ["55-day breakout"])
+        self.assertEqual((scan["strategy"], scan["direction"]), ("channel_breakout", "long"))
 
-        self.call("/api/selection", {"strategy": "breakout", "direction": "short"})
+        self.call("/api/selection", {"strategy": "channel_breakout", "direction": "short"})
         self.assertEqual(self.check(email=False)["results"][0]["entries"], [])
         # Unknown values are ignored, and the choice survives a restart.
         self.call("/api/selection", {"strategy": "nonsense", "direction": "sideways"})
-        self.assertEqual(self.call("/api/state")[1]["selection"], {"strategy": "breakout", "direction": "short", "timeframe": "1d"})
+        self.assertEqual(self.call("/api/state")[1]["selection"],
+                         {"strategy": "channel_breakout", "direction": "short", "timeframe": "1d"})
         from trader import app as app_module
         reopened = app_module.App(self.app.watchlist_path, self.app.config_path, self.app.state_path.parent)
-        self.assertEqual((reopened.strategy, reopened.direction), ("breakout", "short"))
+        self.assertEqual((reopened.strategy, reopened.direction), ("channel_breakout", "short"))
+        # Choices saved by a version before the strategies changed are not carried over.
+        self.app.settings_path.write_text('{"strategy": "channel_breakout", "direction": "both", "auto": true}')
+        older = app_module.App(self.app.watchlist_path, self.app.config_path, self.app.state_path.parent)
+        self.assertEqual((older.strategy, older.direction, older.auto), ("all", "long", True))
+
+    def test_market_filter_is_shown_and_applied(self):
+        from unittest import mock
+        from trader import scanner
+        self.app.config_path.write_text("[data]\nsource = \"twelvedata\"\n")   # filter on by default
+
+        def prices(rising):
+            def fetch(symbol, source="yahoo", notify=print, years=1):
+                history = flat_breakout()
+                if symbol == "SPY":
+                    return market_like(history, rising=rising)
+                history.symbol = symbol
+                return history
+            return fetch
+
+        with mock.patch.object(scanner, "fetch_history", prices(True)):
+            scan = self.check(email=False)
+        self.assertEqual(scan["market"], {"symbol": "SPY", "up": True})
+        self.assertTrue(scan["results"][0]["entries"])
+        with mock.patch.object(scanner, "fetch_history", prices(False)):
+            scan = self.check(email=False)
+        self.assertEqual(scan["market"], {"symbol": "SPY", "up": False})
+        self.assertEqual([row["entries"] for row in scan["results"]], [[], []])
 
     def test_backtest_runs_and_reports(self):
         from unittest import mock
@@ -1022,7 +1120,7 @@ class AppTests(unittest.TestCase):
         self.assertIsNone(self.call("/api/backtest")[1]["result"])
         with mock.patch.object(app_module, "fetch_history", history_for):
             self.assertIn("ticker", self.call("/api/backtest", {"symbol": ""})[1]["error"])
-            body = {"symbol": "aaa", "strategy": "macd_cross", "years": 1, "target": 2,
+            body = {"symbol": "aaa", "strategy": "channel_breakout", "years": 1, "exit": "tp2",
                     "hold": 5, "hold_unit": "days", "budget": 2000, "risk_pct": 2}
             self.assertEqual(self.call("/api/backtest", body)[1]["error"], "")
             for _ in range(2000):
@@ -1031,11 +1129,11 @@ class AppTests(unittest.TestCase):
                     break
         self.assertEqual((status["error"], status["run"]), ("", 1))
         result = self.call("/api/backtest")[1]["result"]
-        self.assertEqual(result["options"]["strategy"], "macd_cross")
-        self.assertEqual(result["options"]["target"], 2)
+        self.assertEqual(result["options"]["strategy"], "channel_breakout")
+        self.assertEqual(result["options"]["exit"], "tp2")
         self.assertEqual((result["symbol"], result["options"]["hold"], result["options"]["budget"]), ("AAA", 5, 2000))
         self.assertTrue(result["trades"])
-        self.assertEqual({t["strategy"] for t in result["trades"]}, {"macd_cross"})
+        self.assertEqual({t["strategy"] for t in result["trades"]}, {"channel_breakout"})
         self.assertEqual(result["total"]["start_budget"], 2000)
         profit = sum(t["pnl"] for t in result["trades"] if t["pnl"] is not None)
         self.assertAlmostEqual(result["total"]["end_budget"], 2000 + profit)
@@ -1056,14 +1154,14 @@ class AppTests(unittest.TestCase):
 
         def hourly_prices(symbol, source="yahoo", notify=print, days=730):
             asked.append((symbol, days))
-            return hourly_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
+            return hourly_breakout()
 
-        self.call("/api/selection", {"strategy": "breakout", "direction": "both", "timeframe": "1h"})
+        self.call("/api/selection", {"strategy": "channel_breakout", "direction": "both", "timeframe": "1h"})
         with mock.patch.object(scanner, "fetch_hourly", hourly_prices):
             scan = self.check(email=False)
         self.assertEqual(asked, [("AAA", 60), ("BBB", 60)])
         self.assertEqual(scan["timeframe"], "1h")
-        self.assertIn("20-hour high", scan["results"][0]["entries"][0]["signals"][0]["reason"])
+        self.assertIn("55-hour high", scan["results"][0]["entries"][0]["signals"][0]["reason"])
         self.assertEqual(self.call("/api/state")[1]["selection"]["timeframe"], "1h")
 
     def test_market_scan(self):
@@ -1077,7 +1175,7 @@ class AppTests(unittest.TestCase):
                 elif symbol == "FLAT":
                     yield symbol, make_history([100.0] * 260)
                 else:
-                    history = make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
+                    history = flat_breakout()
                     history.symbol = symbol
                     yield symbol, history
 
@@ -1086,7 +1184,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(names[:3], ["nasdaq100", "sp500", "dowjones"])
         with mock.patch.object(app_module, "fetch_many", many), \
              mock.patch.object(app_module.universe, "load", lambda name: ["AAA", "FLAT", "NOPE", "ZZZ"]):
-            body = {"universe": "dowjones", "strategy": "breakout", "direction": "long"}
+            body = {"universe": "dowjones", "strategy": "channel_breakout", "direction": "long"}
             self.assertEqual(self.call("/api/screen", body)[1]["error"], "")
             for _ in range(2000):
                 status = self.call("/api/state")[1]["screen"]
@@ -1097,7 +1195,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual((result["name"], result["scanned"], result["failed"]), ("Dow Jones 30", 3, 1))
         self.assertEqual([hit["symbol"] for hit in result["hits"]], ["AAA", "ZZZ"])
         entry = result["hits"][0]["entries"][0]
-        self.assertEqual([s["title"] for s in entry["signals"]], ["Breakout"])
+        self.assertEqual([s["title"] for s in entry["signals"]], ["55-day breakout"])
         self.assertEqual(entry["plan"]["levels"][1]["label"], "SL")
         self.assertEqual(self.sent, [])  # a scan never emails
 
@@ -1320,8 +1418,7 @@ class HostingTests(unittest.TestCase):
 
 class ResendTests(unittest.TestCase):
     def signal(self):
-        history = make_history([100.0] * 259 + [103.0], volumes=[1_000_000.0] * 259 + [2_000_000.0])
-        return next(s for s in scan(history, CONFIG) if s.kind == "breakout")
+        return find(flat_breakout(), "channel_breakout")
 
     def test_alerts_go_through_resend_when_a_key_is_set(self):
         import io, json, os

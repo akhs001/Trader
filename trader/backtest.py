@@ -21,8 +21,11 @@ class Options:
     strategy: str = "all"  # a key of STRATEGIES, or "all"
     direction: str = "both"  # "long", "short" or "both"
     years: float = 2  # how far back to take signals
-    target: int = 1  # which TP ends the trade: 1 or 2
-    hold: int = 30  # close the trade after this long...
+    # How a winning trade ends: "rule" follows the strategy's own exit (for
+    # example a close below the 20-day average); "tp1" and "tp2" take profit at
+    # the first or second target instead.
+    exit: str = "rule"
+    hold: int = 30  # close the trade after this long (0 = no time limit)...
     hold_unit: str = "days"  # ...counted in trading "days" or market "hours"
     budget: float = 10_000.0  # starting budget
     risk_pct: float = 1.0  # share of the budget lost if a trade hits its SL
@@ -40,7 +43,7 @@ class Trade:
     target: float
     exit_date: str  # a day, or "day hour:minute" when tested on hourly candles
     exit: float
-    reason: str  # "target", "stop", "time" or "open"
+    reason: str  # "target", "stop", "rule", "time" or "open"
     r: float  # result in R (multiples of the risk)
     pct: float  # result in percent of the entry price
     held: int  # candles held: trading days, or market hours
@@ -55,16 +58,18 @@ class _Bar:
     high: float
     low: float
     close: float
+    index: int | None = None  # position in the signal history, when it is one of its candles
 
 
 def backtest_stock(history: History, config: dict, options: Options,
-                   hourly: History | None = None) -> list[Trade]:
+                   hourly: History | None = None, benchmark: History | None = None) -> list[Trade]:
     """All trades the signals would have produced for one stock.
 
     With `hourly` candles given, trades are followed hour by hour (needed when
-    the holding time is in hours); otherwise day by day.
+    the holding time is in hours); otherwise day by day. `benchmark` is the
+    market's history, for the market filter.
     """
-    analysis = Analysis(history)
+    analysis = Analysis(history, benchmark)
     count = len(history.closes)
     per_day = HOURS_PER_DAY if history.hourly else 1
     first = max(0, count - int(options.years * 252 * per_day))  # about 252 trading days a year
@@ -75,12 +80,13 @@ def backtest_stock(history: History, config: dict, options: Options,
         limit *= HOURS_PER_DAY
     day_index = {day: i for i, day in enumerate(history.dates)}
     hours = _HourlyBars(hourly) if hourly and not history.hourly else None
+    only = None if options.strategy == "all" else options.strategy
     busy_until: dict[tuple[str, str], int] = {}  # one trade at a time per strategy and direction
     trades = []
     for day in range(first, count):
         if hours and not hours.covers(history.dates[day]):
             continue  # before the hourly candles begin
-        for signal in analysis.scan(config, end=day + 1):
+        for signal in analysis.scan(config, end=day + 1, only=only):
             key = (signal.strategy, signal.direction)
             if (not wanted(signal, options.strategy, options.direction)
                     or signal.plan is None or busy_until.get(key, -1) >= day):
@@ -89,8 +95,8 @@ def backtest_stock(history: History, config: dict, options: Options,
                 bars = hours.after(history.dates[day], history.closes[day])
             else:
                 bars = [_Bar(history.dates[i], history.opens[i], history.highs[i],
-                             history.lows[i], history.closes[i]) for i in range(day + 1, count)]
-            trade = _simulate(history, day, signal, bars, options, limit)
+                             history.lows[i], history.closes[i], i) for i in range(day + 1, count)]
+            trade = _simulate(analysis, day, signal, bars, options, limit)
             if trade.reason == "open":
                 busy_until[key] = count
             elif hours:
@@ -128,12 +134,18 @@ class _HourlyBars:
                 for i in range(last + 1, len(h.dates))]
 
 
-def _simulate(history: History, day: int, signal: Signal, bars: list[_Bar],
+def _simulate(analysis: Analysis, day: int, signal: Signal, bars: list[_Bar],
               options: Options, limit: int) -> Trade:
     """Follow one trade from its entry at the close of candle `day` to its exit."""
+    history = analysis.history
     plan = signal.plan
     sign = 1 if signal.direction == "long" else -1
-    target = plan.targets[min(options.target, len(plan.targets)) - 1]
+    # With the strategy's own exit there is no fixed target: the winner runs
+    # until its exit line is crossed. A strategy without one uses the first TP.
+    by_rule = options.exit == "rule" and bool(plan.exit_kind)
+    which = 2 if options.exit == "tp2" else 1
+    target = plan.targets[min(which, len(plan.targets)) - 1]
+    beyond_reach = sign * float("inf")
     exit_price, reason, held = history.closes[-1], "open", len(bars)
     exit_label = bars[-1].label if bars else history.dates[day]
 
@@ -141,17 +153,21 @@ def _simulate(history: History, day: int, signal: Signal, bars: list[_Bar],
         # The worst and best prices of the candle, seen from the trade's side.
         against = bar.low if sign > 0 else bar.high
         in_favour = bar.high if sign > 0 else bar.low
+        aim = beyond_reach if by_rule else target
         if sign * (bar.open - plan.stop) <= 0:
             exit_price, reason = bar.open, "stop"  # gapped through the stop
-        elif sign * (bar.open - target) >= 0:
+        elif sign * (bar.open - aim) >= 0:
             exit_price, reason = bar.open, "target"  # gapped through the target
         elif sign * (against - plan.stop) <= 0:
             # If stop and target are both touched in one candle, assume the
             # stop came first: the candle cannot tell, so take the worse case.
             exit_price, reason = plan.stop, "stop"
-        elif sign * (in_favour - target) >= 0:
+        elif sign * (in_favour - aim) >= 0:
             exit_price, reason = target, "target"
-        elif number >= limit:
+        elif (by_rule and bar.index is not None and analysis.exit_hit(
+                signal.direction, plan.exit_kind, plan.exit_period, bar.index)):
+            exit_price, reason = bar.close, "rule"  # the trend that carried the trade broke
+        elif limit and number >= limit:
             exit_price, reason = bar.close, "time"
         else:
             continue

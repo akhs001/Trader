@@ -2,68 +2,112 @@
 
 A watchlist scanner that runs on your own computer and opens in your browser.
 Press **Check entries** and it checks every stock on your watchlist for a
-possible entry, shows each one with Entry, SL and TP, and can email them to
-you. It only alerts; it never places trades.
+possible entry, shows each one with Entry, SL, TP and an exit rule, and can
+email them to you. It only alerts; it never places trades.
 
-## Signals
+## Strategies
 
-All signals use daily candles from Yahoo Finance, read through the
-[yfinance](https://github.com/ranaroussi/yfinance) package. During market hours
-today's unfinished candle is included, so a check uses the current price.
+The entry rules come from what professional and systematic traders publish,
+and each one was then tested on nine years of prices for the S&P 500 members
+before being made a default. Three principles apply to every strategy:
 
-Trader looks for long (buy) and short (sell short) entries. Every short signal
-is its long counterpart upside down.
+- **Trade with the market.** Trader looks for long entries only while the
+  S&P 500 (the SPY fund) is above its 200-day average, and for shorts only
+  while it is below. This is the "200-day rule" used by Paul Tudor Jones and
+  in Meb Faber's timing model. When the market is below the line, the page
+  says so and shows no long entries.
+- **Buy leaders.** Most strategies need the stock to pass Mark Minervini's
+  *trend template* first: price above its 50-, 150- and 200-day averages,
+  those averages stacked in that order, the 200-day rising, price within 25%
+  of its one-year high and at least 30% above its one-year low, and not weaker
+  than the market over the last six months.
+- **Leave by rule.** Every plan has a stop and an exit rule, so a loss stays
+  small and a winner is not cut short by a fixed target.
 
-| Long signal | Fires when | Short signal | Fires when |
+### Tested strategies (on by default)
+
+| Strategy | Entry | SL | Exit |
 | --- | --- | --- | --- |
-| Uptrend continuation | A massive run up (at least 10 ATR within 60 days, with the 20-day average above the 50-day above the 200-day) gave back 30% to 65% of the run in the last few days, and the price now trades above yesterday's high for the first time. | Downtrend continuation | A massive drop of the same size, with the averages stacked the other way, bounced 30% to 65% of the drop, and the price now trades below yesterday's low for the first time. |
-| Trend pullback | Uptrend (above the 200-day average) dipped at least 2 ATR to its 20- or 50-day average, or to RSI below 40, and now trades above yesterday's high for the first time. | Downtrend rally | Downtrend (below the 200-day average) rallied at least 2 ATR to its 20- or 50-day average, or to RSI above 60, and now trades below yesterday's low for the first time. |
-| Breakout | Price moves above its 20-day high on at least 1.5x average volume. | Breakdown | Price moves below its 20-day low on at least 1.5x average volume. |
-| Oversold bounce | RSI(14) was below 30 yesterday and is back above it. | Overbought reversal | RSI(14) was above 70 yesterday and is back below it. |
-| Moving-average cross | The 20-day average crosses above the 50-day average. | Moving-average cross down | The 20-day average crosses below the 50-day average. |
-| MACD cross | MACD (12, 26, 9) crosses above its signal line. | MACD cross down | MACD crosses below its signal line. |
+| **Dip in a leader** (Larry Connors' 2-day RSI, restricted to leaders) | A leader sells off sharply for a day or two: RSI(2) falls below 10. | 3 ATR below the entry. | The first close back above the 10-day average. That average is the TP shown. |
+| **Gap on heavy volume** (the drift after news or earnings) | The stock opens at least 1.5 ATR above yesterday's close on at least twice its 50-day average volume, never fills the gap, and closes in the upper half of the day's range. | Just below the gap day's low. | The first close below the low of the previous 20 days. |
 
-To get only one direction, put this in `config.local.toml`:
+### Unproven strategies (off; run when you pick one by name)
 
-```toml
-[signals]
-short = false
-```
+| Strategy | Entry | SL | Exit |
+| --- | --- | --- | --- |
+| **Base breakout** (William O'Neil, Minervini) | A leader closes above the top of a five-week base that has tightened, on volume 40% above average, at most 5% past it. | Below the low of the base's last days, at most 8% away. | The first close below the 20-day average. |
+| **Pullback with a turn** | A leader dips at least 2 ATR to its 20- or 50-day average, then closes above the previous day's high. | Below the pullback low. | The first close below the 10-day low. |
+| **55-day breakout** (the Turtles' long-term system) | A close above the high of the last 55 days. | 2 ATR below the entry. | The first close below the 20-day low. |
+
+Every strategy also has a short form, the same rule upside down, which Trader
+only looks for when you choose "Long and short" or "Short only".
+
+### What the testing showed
+
+All five strategies were replayed on about 500 current S&P 500 members from
+2017 to 2026 with the rules above, and compared with entering on a random day
+with the same stop and exit.
+
+- **Random entries did about as well as the breakout and pullback rules**
+  (around +0.25R per trade either way). In that period most of the profit came
+  from holding rising stocks with a stop and a trailing exit, not from the
+  entry signal. That is why those three are marked unproven.
+- **Dip in a leader** made 7,100 trades with 70% winners, about +0.43% per
+  trade in 5 days, against +0.14% for a random day in the same stocks. It wins
+  often and small, and its stop is far away by design.
+- **Gap on heavy volume** made 1,400 trades with only 30% winners, but large
+  ones: about +3.0% per trade over a month, roughly twice the random-entry
+  result per day held.
+- **No short form made money**, with or without the market filter.
+- **Every long signal did worse while the market was below its 200-day
+  average.**
+
+Read these numbers with care. The test used today's index members, which
+leaves out companies that failed and so flatters long trades. It ignores
+commissions and slippage, which matter most for the small, frequent dip
+trades. It covers one mostly rising decade of large US stocks. And the
+strategies were not tested on hourly candles at all. An edge of this size
+means many losing trades and losing months; keep the risk per trade small.
 
 ## Trade plan
 
-Every alert comes with Entry, SL, TP1 and TP2:
+Every alert comes with a plan:
 
 - **Entry** is the price at the moment of the scan.
-- **SL** sits just beyond the price that would prove the setup wrong: for a
-  long, below the pullback low, the breakout level, or the recent low; for a
-  short, above the rally high, the breakdown level, or the recent high. It is kept between 1
-  and 3 ATR from the entry (ATR is the stock's average daily range), so it is
-  neither inside everyday noise nor unreasonably far. Average and MACD crosses
-  have no such price, so their SL is 2 ATR from the entry.
-- **TP1 and TP2** are 2 and 3 times the risk (the distance from entry to SL)
-  on the profit side: above the entry for a long, below it for a short.
+- **SL** is the strategy's stop from the tables above, kept between 1 and 3
+  ATR from the entry (ATR is the stock's average daily range).
+- **TP.** A dip aims at its 10-day average, shown as TP. Strategies that let a
+  winner run show TP1 and TP2 at 2 and 3 times the risk as reference points.
+- **Exit rule.** The condition that ends the trade, as in the tables. Trader
+  does not watch open trades for you: check the rule each day after the close.
 
 When a stock fires several signals in the same direction at once, the plan
-follows the first one listed. The levels come from fixed rules, not from a forecast, and have not
-been backtested.
+follows the first one listed.
 
 ## Settings
 
 Thresholds, the trade-plan rules and the check interval live in `config.toml`,
-where each signal can also be switched off. Do not edit that file, because
-updates replace it. Create `config.local.toml` next to it instead and put only
-the settings you want to change in it:
+with a comment on every setting. Do not edit that file, because updates
+replace it. Create `config.local.toml` next to it instead and put only the
+settings you want to change in it:
 
 ```toml
-[plan]
-targets_r = [1.5, 3.0]
+[signals.dip]
+rsi_level = 5          # only the sharpest dips
 
-[signals.ma_cross]
-macd = false
+[signals.pullback]
+enabled = true         # add an unproven strategy to the default set
+
+[market]
+filter = false         # look for entries whatever the market is doing
 ```
- After a signal is emailed for a stock, the same signal
-stays quiet for `cooldown_days` (default 5).
+
+After a signal is emailed for a stock, the same signal stays quiet for
+`cooldown_days` (default 5).
+
+Prices are daily candles from Yahoo Finance, read through the
+[yfinance](https://github.com/ranaroussi/yfinance) package. During market hours
+today's unfinished candle is included, so a check uses the current price.
 
 ## Setup
 
@@ -88,10 +132,13 @@ in the project folder. Trader opens in your browser at
 <http://127.0.0.1:8765>. Keep the small console window open while you use it;
 closing it stops Trader.
 
-- **Strategy** and **Direction** choose what a check looks for: all strategies
-  or one of them (trend continuation, trend pullback, breakout, RSI reversal,
-  moving-average cross, MACD cross), and long, short or both. The choice is remembered and
-  also applies to automatic checks and emails.
+- **Strategy** and **Direction** choose what a check looks for. "Tested
+  strategies" runs the default set; picking a strategy by name runs that one,
+  unproven or not. Direction starts at "Long only": shorts are looked for only
+  when you choose them. The choice is remembered and also applies to automatic
+  checks and emails.
+- **The market line** under the button says whether the S&P 500 is above its
+  200-day average. When it is below, no long entries are shown.
 - **Candles** chooses the timeframe. *Daily* looks for swing entries on daily
   candles. *Hourly (day trading)* runs the same strategies on hourly candles:
   every "day" in a rule becomes an hour (the 20-hour average, the previous
@@ -130,16 +177,17 @@ when that list cannot be reached.
 The Backtest tab shows how the strategies would have done on one stock's past
 prices. You choose:
 
-- **Strategy** and **Direction**: all strategies or one, long, short or both.
+- **Strategy** and **Direction**: the tested set or one strategy, long, short
+  or both.
 - **Candles**: daily, or hourly to test day trading. On hourly candles the
   signals, the entries and the exits all come from hourly prices, which reach
   back about two years.
 - **Ticker**: any ticker, on your watchlist or not.
 - **Period**: the last 1, 2 or 5 years.
-- **Take profit at**: whether TP1 or TP2 ends a winning trade.
-- **Close after**: how long a trade may stay open if neither SL nor TP is
-  reached, from 1 hour to 60 days. Choices in hours follow each trade on
-  hourly prices, which reach back about two years.
+- **Exit**: the strategy's own exit rule (the default), or a fixed TP1 or TP2.
+- **Close after**: an optional time limit on a trade, from 1 hour to 60 days.
+  Choices in hours follow each trade on hourly prices, which reach back about
+  two years.
 - **Start budget** and **Risk per trade**: the money you start with, and the
   share of it a trade loses if its SL is hit.
 
@@ -151,7 +199,7 @@ number of trades, win rate, average result and profit factor (gains divided
 by losses; above 1 is profitable), a chart of the budget over time, a table
 per strategy and side, and every trade. Results per trade are in R: 1R is the
 amount risked on the trade, the distance from entry to SL. A trade stopped out
-loses 1R; one that reaches TP1 gains 2R.
+loses 1R.
 
 What the backtest assumes:
 
@@ -160,6 +208,7 @@ What the backtest assumes:
   holding time is in hours), the SL counts.
 - A price that opens beyond the SL or TP exits at that opening price.
 - One trade at a time per strategy and side.
+- The market filter applies on every past day, as it does live.
 - Each trade risks the chosen percentage of the budget as it stands at entry.
   A position is never larger than the budget, and fractions of a share are
   allowed.

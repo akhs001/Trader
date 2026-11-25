@@ -2,102 +2,102 @@
 # To change a setting, create a file named config.local.toml next to this one
 # and put only the settings you want to change in it, for example:
 #
-#   [plan]
-#   targets_r = [1.5, 3.0]
-#
-#   [signals.ma_cross]
-#   macd = false
-#
-# Settings for the watchlist scanner. All signals use daily candles; during
-# market hours today's unfinished candle is included, so prices are live
-# (about 15 minutes delayed).
-
-[data]
-# Where prices come from.
-#   "yahoo"       Yahoo Finance, through the yfinance package. No key needed
-#                 and no per-minute limit.
-#   "twelvedata"  Twelve Data. Needs TWELVE_DATA_API_KEY in .env; the free
-#                 plan allows 8 requests a minute.
-source = "yahoo"
-
-[schedule]
-# How often the bot checks the watchlist while the US market is open.
-interval_minutes = 15
-
-[alerts]
-# After a signal fires for a stock, the same signal is not emailed again
-# for this many calendar days.
-cooldown_days = 5
-# The same, for signals from hourly candles.
-cooldown_hours = 24
+#   [market]
+# Trade with the market: look for long entries only while the S&P 500 is above
+# its 200-day average, and for short entries only while it is below. In testing
+# every long signal did worse in a falling market.
+filter = true
+# The fund that stands for the market.
+symbol = "SPY"
 
 [plan]
-# Every alert comes with a trade plan: Entry, SL and TP.
+# Every alert comes with a trade plan: Entry, SL, a target and an exit rule.
 # Entry = the price at scan time.
-# SL = just below the level that would prove the setup wrong (the pullback
-# low, the breakout level, the recent low), kept between `min_stop_atr` and
-# `max_stop_atr` ATRs from the entry. ATR is the stock's average daily range.
-# Signals without such a level (average and MACD crosses) use `default_stop_atr`.
+# SL = just beyond the level that would prove the setup wrong, kept between
+# `min_stop_atr` and `max_stop_atr` ATRs from the entry. ATR is the stock's
+# average daily range. A setup without such a level names its own distance.
 min_stop_atr = 1.0
 max_stop_atr = 3.0
 default_stop_atr = 2.0
-# TP levels, as multiples of the risk (entry minus SL). [2.0, 3.0] means TP1
-# is twice as far from the entry as the SL, and TP2 three times as far.
+# TP levels shown for strategies that let a winner run, as multiples of the
+# risk (entry to SL). They are reference points; the exit rule ends the trade.
 targets_r = [2.0, 3.0]
 
 [signals]
-# Which kinds of entry to look for. Long = buy, short = sell short.
-# Every signal below is described for longs; its short version is the same
-# rule upside down (a rally in a downtrend, a breakdown below the 20-day low,
-# RSI dropping back below 70, the averages or MACD crossing down), with the SL
-# above the entry and the TPs below it.
+# Long = buy, short = sell short. Every strategy below is described for longs;
+# its short form is the same rule upside down. In testing on the S&P 500 no
+# short form made money, so shorts are only looked for when you choose
+# "Short only" or "Long and short" on the page.
 long = true
 short = true
 
-[signals.trend_continuation]
-enabled = true
-# A massive move, a partial retrace of it, and the first day it resumes.
-# The move ("leg") is measured inside the last `leg_days` days and must be at
-# least `min_leg_atr` ATRs from its start to its top, with the 20-day average
-# above the 50-day above the 200-day. Lower `min_leg_atr` for more signals.
-# The retrace must give back between `min_retrace_pct` and `max_retrace_pct`
-# of the leg, and its low must be within the last `lookback_days` days.
-# Entry = the first day the price moves above the previous day's high.
-leg_days = 60
-min_leg_atr = 10
-min_retrace_pct = 30
-max_retrace_pct = 65
-lookback_days = 5
+# --- Strategies that beat a random entry in testing; on by default -----------
 
-[signals.trend_pullback]
+[signals.dip]
 enabled = true
-# Uptrend = price above the 200-day average and 50-day above 200-day.
-# Pullback = within the last `lookback_days` the low came within
-# `touch_pct` percent of the 20- or 50-day average, or RSI fell below `rsi_below`.
-# The dip must be at least `min_depth_atr` ATRs deep, measured from the
-# 20-day high. Raise it to get fewer, deeper pullbacks.
-# Entry = the first day the price moves above the previous day's high.
+# Dip in a leader. A stock in a strong uptrend (see "leader" below) has a
+# sharp two-day sell-off: RSI(2) falls below `rsi_level`.
+# SL = `stop_atr` ATRs below the entry.
+# Exit = the first close back above the `exit_average`-day average.
+rsi_level = 10
+stop_atr = 3.0
+exit_average = 10
+# Only dips in leaders. false = any stock above its 200-day average.
+leaders_only = true
+
+[signals.gap]
+enabled = true
+# Gap on heavy volume. The stock opens at least `gap_atr` ATRs above
+# yesterday's close, trades `volume_ratio` times its 50-day average volume,
+# never fills the gap and closes in the upper half of the day's range.
+# SL = just below the gap day's low.
+# Exit = the first close below the low of the previous `exit_low` days.
+gap_atr = 1.5
+volume_ratio = 2.0
+exit_low = 20
+
+# --- Classic rules that did NOT beat a random entry in testing; off ----------
+# They still run when you pick one by name on the page.
+
+[signals.base_breakout]
+enabled = false
+# O'Neil / Minervini. A leader closes above the top of a `base_days` base
+# that is at most `max_depth_pct` deep and has tightened (the last
+# `tight_days` days span at most `tightness` of the base), on `volume_ratio`
+# times its 50-day average volume, and is at most `max_chase_pct` past it.
+# SL = below the low of the base's last days, at most `max_stop_pct` away.
+# Exit = the first close below the `exit_average`-day average.
+base_days = 25
+tight_days = 10
+tightness = 0.6
+max_depth_pct = 25
+max_chase_pct = 5
+volume_ratio = 1.4
+max_stop_pct = 8
+exit_average = 20
+
+[signals.pullback]
+enabled = false
+# A leader dips at least `min_depth_atr` ATRs to its 20- or 50-day average
+# within `lookback_days`, then closes above the previous day's high.
+# SL = below the pullback low.
+# Exit = the first close below the low of the previous `exit_low` days.
 lookback_days = 5
-min_depth_atr = 2.0
 touch_pct = 1.0
-rsi_below = 40
+min_depth_atr = 2.0
+exit_low = 10
 
-[signals.breakout]
-enabled = true
-# Entry = price moves above the highest high of the previous `lookback_days`
-# with volume at least `volume_ratio` times the 20-day average.
-lookback_days = 20
-volume_ratio = 1.5
+[signals.channel_breakout]
+enabled = false
+# The Turtles' long-term system: a close above the high of the last `days`.
+# SL = `stop_atr` ATRs below the entry.
+# Exit = the first close below the low of the previous `exit_low` days.
+days = 55
+stop_atr = 2.0
+exit_low = 20
 
-[signals.oversold_bounce]
-enabled = true
-# Entry = RSI(14) was below `rsi_level` yesterday and is back above it today.
-rsi_level = 30
-
-[signals.ma_cross]
-enabled = true
-# Entry = the fast average crosses above the slow average.
-fast = 20
-slow = 50
-# Also alert when MACD (12, 26, 9) crosses above its signal line.
-macd = true
+# A "leader" is a stock that passes Mark Minervini's trend template: price
+# above its 50-, 150- and 200-day averages, those averages stacked in that
+# order, the 200-day rising, price within 25% of its one-year high and at
+# least 30% above its one-year low, and not weaker than the market over the
+# last six months.

@@ -79,6 +79,9 @@
   .auto-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
   select { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line);
            border-radius: 6px; padding: 2px 6px; }
+  .market-note { margin-top: 10px; font-size: 13px; color: var(--muted); padding-left: 10px;
+                 border-left: 3px solid var(--up); }
+  .market-note.down { border-left-color: var(--down); color: var(--text); }
   .status { margin-top: 12px; font-size: 14px; color: var(--muted); min-height: 21px; }
   .bar { height: 4px; border-radius: 2px; background: var(--soft); margin-top: 10px; overflow: hidden; display: none; }
   .bar span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
@@ -158,8 +161,8 @@
       <label>Strategy <select id="strategy"></select></label>
       <label>Direction
         <select id="direction">
-          <option value="both">Long and short</option>
           <option value="long">Long only</option>
+          <option value="both">Long and short</option>
           <option value="short">Short only</option>
         </select>
       </label>
@@ -183,6 +186,7 @@
     </div>
     <div class="bar" id="bar"><span></span></div>
     <div class="status" id="status"></div>
+    <div class="market-note" id="market-note" style="display:none"></div>
   </section>
 
   <div id="entries"></div>
@@ -205,8 +209,8 @@
         <label>Strategy <select id="sc-strategy"></select></label>
         <label>Direction
           <select id="sc-direction">
-            <option value="both">Long and short</option>
             <option value="long">Long only</option>
+            <option value="both">Long and short</option>
             <option value="short">Short only</option>
           </select>
         </label>
@@ -226,8 +230,8 @@
         <label>Strategy <select id="bt-strategy"></select></label>
         <label>Direction
           <select id="bt-direction">
-            <option value="both">Long and short</option>
             <option value="long">Long only</option>
+            <option value="both">Long and short</option>
             <option value="short">Short only</option>
           </select>
         </label>
@@ -248,10 +252,11 @@
             <option value="5">Last 5 years</option>
           </select>
         </label>
-        <label>Take profit at
-          <select id="bt-target">
-            <option value="1">TP1</option>
-            <option value="2">TP2</option>
+        <label>Exit
+          <select id="bt-exit">
+            <option value="rule">The strategy's exit rule</option>
+            <option value="tp1">At TP1</option>
+            <option value="tp2">At TP2</option>
           </select>
         </label>
         <label>Close after
@@ -270,8 +275,9 @@
             </optgroup>
             <optgroup label="Longer">
               <option value="20d">20 days</option>
-              <option value="30d" selected>30 days</option>
+              <option value="30d">30 days</option>
               <option value="60d">60 days</option>
+              <option value="0d" selected>No time limit</option>
             </optgroup>
           </select>
         </label>
@@ -375,6 +381,16 @@ function render() {
     (setup.email_problem || "Email is not set up.")}));
   $("logout-wrap").style.display = state.auth ? "" : "none";
   if (scan.error) banners.append(el("div", {class: "banner error", text: scan.error}));
+  const marketNote = $("market-note");
+  if (scan.market) {
+    marketNote.textContent = scan.market.up
+      ? "The market (" + scan.market.symbol + ") is above its 200-day average, so Trader looks for long entries."
+      : "The market (" + scan.market.symbol + ") is below its 200-day average, so Trader shows no long entries: in testing every long signal did worse in a falling market.";
+    marketNote.className = "market-note" + (scan.market.up ? "" : " down");
+    marketNote.style.display = "";
+  } else {
+    marketNote.style.display = "none";
+  }
 
   // Strategy and direction for checks
   fillStrategies($("strategy"), state.strategies || []);
@@ -474,13 +490,15 @@ function render() {
 
 function fillStrategies(select, strategies) {
   if (select.options.length || !strategies.length) return;
-  select.append(el("option", {value: "all", text: "All strategies"}));
-  for (const strategy of strategies) select.append(el("option", {value: strategy.id, text: strategy.name}));
+  select.append(el("option", {value: "all", text: "Tested strategies"}));
+  for (const strategy of strategies) {
+    select.append(el("option", {value: strategy.id, text: strategy.name + (strategy.unproven ? " (unproven)" : "")}));
+  }
 }
 
 function selectionLabel(strategy, direction, timeframe) {
   const found = ((state && state.strategies) || []).find((item) => item.id === strategy);
-  const name = found ? found.name : "all strategies";
+  const name = found ? found.name : "tested strategies";
   return name + (direction === "long" ? ", long only" : direction === "short" ? ", short only" : "") +
     (timeframe === "1h" ? ", hourly candles" : "");
 }
@@ -552,8 +570,11 @@ function renderScreen() {
     plural(result.hits.length, "stock") + " with a possible entry"}));
   const summary = "Checked " + plural(result.scanned, "stock") + " at " + clock(result.finished) +
     (result.failed ? "; " + result.failed + " had no prices." : ".");
+  const marketLine = !result.market ? "" : result.market.up
+    ? " The market (" + result.market.symbol + ") is above its 200-day average, so long entries are allowed."
+    : " The market (" + result.market.symbol + ") is below its 200-day average, so no long entries are shown.";
   if (!result.hits.length) {
-    box.append(el("section", {class: "card"}, el("div", {class: "empty", text: summary + " No entries right now."})));
+    box.append(el("section", {class: "card"}, el("div", {class: "empty", text: summary + " No entries right now." + marketLine})));
     return;
   }
   const table = el("table", {class: "compact"}, el("thead", {}, el("tr", {},
@@ -591,7 +612,7 @@ function renderScreen() {
   }
   table.append(body);
   box.append(el("section", {class: "card"}, el("div", {class: "table-wrap"}, table),
-    el("div", {class: "small", text: summary + " Click a ticker to open its chart."})));
+    el("div", {class: "small", text: summary + marketLine + " Click a ticker to open its chart."})));
 }
 
 // ---- backtest ----------------------------------------------------------------
@@ -727,7 +748,7 @@ function renderBacktest() {
     el("th", {class: "num", text: hours ? "Hours" : "Days"}), el("th", {class: "num", text: "Result"}),
     el("th", {class: "num", text: "Profit"}))));
   const tradeRows = el("tbody");
-  const reasons = {target: "Take profit", stop: "Stop loss", time: "Time limit", open: "Still open"};
+  const reasons = {target: "Take profit", stop: "Stop loss", rule: "Exit rule", time: "Time limit", open: "Still open"};
   const shown = showAllTrades ? result.trades : result.trades.slice(0, 50);
   for (const trade of shown) {
     tradeRows.append(el("tr", {},
@@ -746,8 +767,11 @@ function renderBacktest() {
     tradesCard.append(el("div", {class: "signal"}, more));
   }
   tradesCard.append(el("ul", {class: "notes"},
-    el("li", {text: "Each trade enters at the close of the signal " + (hourlySignals ? "hour" : "day") + " and ends at its SL, at TP" + options.target + ", or after " +
-      holdLabel(options, options.hold) + (hours ? " of market time, followed on hourly prices." : ".")}),
+    el("li", {text: "Each trade enters at the close of the signal " + (hourlySignals ? "hour" : "day") + " and ends at its SL, " +
+      (options.exit === "rule" ? "by its strategy's exit rule" : "at " + options.exit.toUpperCase()) +
+      (options.hold ? ", or after " + holdLabel(options, options.hold) + (hours ? " of market time" : "") : "") +
+      (hours ? ". Trades are followed on hourly prices." : ".")}),
+    el("li", {text: "The market filter is applied: no long trades are opened while the market is below its 200-day average, and no shorts while it is above."}),
     el("li", {text: "Each trade risks " + options.risk_pct + "% of the budget at that moment: that is what it loses at its SL. A position is never larger than the budget, and fractions of a share are allowed."}),
     el("li", {text: "When SL and TP are both touched in the same " + (hours ? "hour" : "day") + ", the SL is assumed to come first."}),
     el("li", {text: "One trade at a time per strategy and side. Commissions, slippage and borrowing costs for shorts are not included."}),
@@ -909,7 +933,7 @@ $("bt-run").addEventListener("click", async () => {
   const result = await post("/api/backtest", {
     strategy: $("bt-strategy").value, direction: $("bt-direction").value, symbol: $("bt-symbol").value,
     timeframe: $("bt-timeframe").value,
-    years: Number($("bt-years").value), target: Number($("bt-target").value), ...holdChoice(),
+    years: Number($("bt-years").value), exit: $("bt-exit").value, ...holdChoice(),
     budget: Number($("bt-budget").value), risk_pct: Number($("bt-risk").value),
   });
   backtestFormError = result.error || "";
